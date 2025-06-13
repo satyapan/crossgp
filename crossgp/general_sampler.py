@@ -7,6 +7,7 @@ import corner
 from GPy.inference.latent_function_inference.posterior import Posterior
 from GPy.util import diag
 from GPy.util.linalg import pdinv, dpotrs, tdot, dpotri, jitchol
+from GPy.core.parameterization.priors import Uniform
 log_2_pi = np.log(2*np.pi)
 
 class GPHyperparameterSampler:
@@ -160,25 +161,35 @@ class DiagSampler:
         corner.corner(self.posterior_samples, labels=self.param_names_flat)
 
 
-class SharedDiagSampler:
-    def __init__(self, freqs, Y_all, kerns, noise_var, param_names, prior_bounds):
+
+
+class SharedSampler:
+    def __init__(self, freqs, Y_all, kerns, noise_var, param_names, prior_bounds, diag=False):
         self.freqs = freqs
         self.Y_all = Y_all
         self.kerns = [kerns[0].copy(),kerns[1].copy()]
         self.param_names = param_names
+        self.param_names_flat = [item for sublist in self.param_names for item in sublist]
         self.prior_bounds = prior_bounds
-        self.ndim = len(param_names)
+        self.ndim = len(param_names[0])+len(param_names[1])
+        self.N_theta1 = len(param_names[0])
         self.noise_var = noise_var
         self.models = None
+        self.diag = diag
         
     def K_comb(self, X):
         N = len(X)
         kern1, kern2 = self.kerns
-        K1 = kern1.K(X)
-        K2 = kern2.K(X)
+        diag = kern1+kern2
+        offdiag = kern1
+        K1 = diag.K(X)
+        K2 = offdiag.K(X)
         K = np.zeros((2*N,2*N))
         K[:N,:N] = K1
-        K[N:,N:] = K2
+        K[N:,N:] = K1
+        if not self.diag:
+            K[:N,N:] = K2
+            K[N:,:N] = K2
         return K
 
     def lml(self, X, Y):
@@ -192,17 +203,12 @@ class SharedDiagSampler:
         alpha, _ = dpotrs(LW, YYT_factor, lower=1)
         log_marginal =  0.5*(-Y.size * log_2_pi - Y.shape[1] * W_logdet - np.sum(alpha * YYT_factor))
         return log_marginal
-        
+
     def set_params(self, thetas, kerns):
-        if len(thetas) == 1:
-            for i in range(2):
-                setattr(kerns[i], self.param_names[0], thetas[0])
-        else:
-            for i in range(2):
-                for j in range(len(self.param_names)):
-                    parts = self.param_names[j].split('.')
-                    attr = getattr(kerns[i],parts[0])
-                    setattr(attr, parts[1], thetas[j])
+        thetas = [thetas[:self.N_theta1],thetas[self.N_theta1:]]
+        for i in range(2):
+            for j in range(len(self.param_names[i])):
+                setattr(kerns[i], self.param_names[i][j], thetas[i][j])
         return kerns
 
     def log_likelihood(self, thetas):
@@ -243,9 +249,20 @@ class SharedDiagSampler:
     def plot_corner(self):
         corner.corner(self.posterior_samples, labels=self.param_names)
         
+    def predict_coh(self):
+        K_p = self.kerns[0].K(self.freqs)
+        K = self.K_comb(self.freqs)
+        diag.add(K, self.noise_var)
+        Wi, LW, LWi, W_logdet = pdinv(K)
+        alpha, _ = dpotrs(LW, self.Y_all, lower=1)
+        y_mean = np.vstack((K_p,K_p)).T.dot(alpha)
+        v, _ = dpotrs(LW, np.vstack((K_p,K_p)), lower=1)
+        y_cov = K_p - np.vstack((K_p,K_p)).T.dot(v)
+        return y_mean, y_cov
+
     def predict(self, kern_pred):
         K_p = kern_pred.K(self.freqs)
-        K = self.kerns[0].K(self.freqs)
+        K = (self.kerns[0]+self.kerns[1]).K(self.freqs)
         diag.add(K, self.noise_var)
         Wi, LW, LWi, W_logdet = pdinv(K)
         alpha1, _ = dpotrs(LW, self.Y_all[:len(self.freqs),:], lower=1)
