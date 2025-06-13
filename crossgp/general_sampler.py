@@ -19,7 +19,7 @@ class GPHyperparameterSampler:
         self.prior_bounds = prior_bounds
         self.ndim = len(param_names)
         self.noise_variance = noise_variance
-        self.model = GPy.models.GPRegression(self.freqs, Y_all, kernel=self.kernel)
+        self.model = GPy.models.GPRegression(freqs, Y_all, kernel=self.kernel)
         self.model.Gaussian_noise.variance = noise_variance
         self.model.Gaussian_noise.fix()
 
@@ -37,10 +37,15 @@ class GPHyperparameterSampler:
         return self.model.log_likelihood()
 
     def log_prior(self, theta):
-        for val, (low, high) in zip(theta, self.prior_bounds):
-            if not (low < val < high):
-                return -np.inf
-        return 0.0
+        logp = 0.0
+        for val, prior in zip(theta, self.prior_bounds):
+            if prior is None:
+                continue
+            lp = prior.lnpdf(val)
+            if type(prior) == GPy.core.parameterization.priors.Uniform:
+                lp = np.log(lp)
+            logp += lp
+        return logp
 
     def log_posterior(self, theta):
         lp = self.log_prior(theta)
@@ -69,6 +74,18 @@ class GPHyperparameterSampler:
 
     def plot_corner(self):
         corner.corner(self.posterior_samples, labels=self.param_names)
+
+    def predict(self, kern_pred):
+        K_p = kern_pred.K(self.freqs)
+        K = self.kernel.K(self.freqs)
+        diag.add(K, self.model.Gaussian_noise.variance)
+        Wi, LW, LWi, W_logdet = pdinv(K)
+        alpha, _ = dpotrs(LW, self.Y_all[:len(self.freqs),:], lower=1)
+        y_mean = K_p.T.dot(alpha)
+        Wi, LW, LWi, W_logdet = pdinv(K)
+        v, _ = dpotrs(LW, K_p, lower=1)
+        y_cov = K_p - K_p.T.dot(v)
+        return y_mean, y_cov
 
 
 
@@ -207,8 +224,14 @@ class SharedSampler:
     def set_params(self, thetas, kerns):
         thetas = [thetas[:self.N_theta1],thetas[self.N_theta1:]]
         for i in range(2):
-            for j in range(len(self.param_names[i])):
-                setattr(kerns[i], self.param_names[i][j], thetas[i][j])
+            if any('.' in s for s in self.param_names[i]):
+                for j in range(len(self.param_names[i])):
+                    parts = self.param_names[i][j].split('.')
+                    attr = getattr(kerns[i],parts[0])
+                    setattr(attr, parts[1], thetas[i][j])
+            else:
+                for j in range(len(self.param_names[i])):
+                    setattr(kerns[i], self.param_names[i][j], thetas[i][j])
         return kerns
 
     def log_likelihood(self, thetas):
@@ -216,10 +239,15 @@ class SharedSampler:
         return self.lml(self.freqs, self.Y_all)
 
     def log_prior(self, thetas):
-        for val, (low, high) in zip(thetas, self.prior_bounds):
-            if not (low < val < high):
-                return -np.inf
-        return 0.0
+        logp = 0.0
+        for val, prior in zip(thetas, self.prior_bounds):
+            if prior is None:
+                continue
+            lp = prior.lnpdf(val)
+            if type(prior) == GPy.core.parameterization.priors.Uniform:
+                lp = np.log(lp)
+            logp += lp
+        return logp
 
     def log_posterior(self, thetas):
         lp = self.log_prior(thetas)
@@ -228,7 +256,7 @@ class SharedSampler:
         return lp + self.log_likelihood(thetas)
 
     def run_sampler(self, initial_position, nwalkers=50, nsteps=50, discard=10):
-        p0 = [initial_position + 0.1 * np.random.randn(self.ndim) for _ in range(nwalkers)]
+        p0 = [initial_position + 0.001 * np.random.randn(self.ndim) for _ in range(nwalkers)]
         sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior)
         sampler.run_mcmc(p0, nsteps, progress=True)
         self.posterior_samples = sampler.get_chain(discard=discard, flat=True)
@@ -243,11 +271,11 @@ class SharedSampler:
 
     def print_posterior_means(self):
         mean_vals = np.mean(self.posterior_samples, axis=0)
-        for name, val in zip(self.param_names, mean_vals):
+        for name, val in zip(self.param_names_flat, mean_vals):
             print(f"Posterior mean {name}: {val}")
 
     def plot_corner(self):
-        corner.corner(self.posterior_samples, labels=self.param_names)
+        corner.corner(self.posterior_samples, labels=self.param_names_flat)
         
     def predict_coh(self):
         K_p = self.kerns[0].K(self.freqs)
