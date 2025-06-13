@@ -42,7 +42,7 @@ class Log10Uniform(GPy.core.parameterization.priors.Prior):
 
 
 class SharedVisSampler:
-    def __init__(self, data_nights, kerns, noise_var, param_names, prior_bounds):
+    def __init__(self, data_nights, kerns, noise_nights, param_names, prior_bounds):
         self.data1 = data_nights[0]
         self.data2 = data_nights[1]
         self.freqs = self.data1.freqs.reshape(-1,1)*1e-6
@@ -54,7 +54,8 @@ class SharedVisSampler:
         self.prior_bounds = prior_bounds
         self.ndim = len(param_names[0])+len(param_names[1])
         self.N_theta1 = len(param_names[0])
-        self.noise_var = noise_var
+        self.noise1_var = noise_nights[0].data.real.var()
+        self.noise2_var = noise_nights[1].data.real.var()
         self.result = None
         
     def K_comb(self, X, kerns):
@@ -77,7 +78,8 @@ class SharedVisSampler:
         YYT_factor = Y-m
         K = self.K_comb(X, self.kerns)
         Ky = K.copy()
-        diag.add(Ky, self.noise_var+1e-8)
+        Ky[:N,:N] += self.noise1_var*np.eye(N)
+        Ky[N:,N:] += self.noise2_var*np.eye(N)
         Wi, LW, LWi, W_logdet = pdinv(Ky)
         alpha, _ = dpotrs(LW, YYT_factor, lower=1)
         log_marginal =  0.5*(-Y.size * log_2_pi - Y.shape[1] * W_logdet - np.sum(alpha * YYT_factor))
@@ -143,7 +145,8 @@ class SharedVisSampler:
     def posterior_mean(self, kern_pred, coh=True):
         N = len(self.freqs)
         K = self.K_comb(self.freqs, self.kerns)
-        diag.add(K, self.noise_var)
+        K[:N,:N] += self.noise1_var*np.eye(N)
+        K[N:,N:] += self.noise2_var*np.eye(N)
         Wi, LW, LWi, W_logdet = pdinv(K)
         alpha, _ = dpotrs(LW, self.Y_all, lower=1)
         if coh:
@@ -162,44 +165,6 @@ class SharedVisSampler:
             K_p[:N,:N] = kern_pred.K(self.freqs)
             K_p[N:,N:] = kern_pred.K(self.freqs)
             y_mean = K_p.T.dot(alpha)
-            y_mean1 = y_mean[:N,:]
-            y_mean2 = y_mean[N:,:]
-            y_mean1_complex = y_mean1[:,:y_mean1.shape[1]//2] + 1j*y_mean1[:,y_mean1.shape[1]//2:]
-            y_mean2_complex = y_mean2[:,:y_mean2.shape[1]//2] + 1j*y_mean2[:,y_mean2.shape[1]//2:]
-            data_pred1 = self.data1.copy()
-            data_pred2 = self.data2.copy()
-            data_pred1.data = y_mean1_complex
-            data_pred2.data = y_mean2_complex
-            return data_pred1, data_pred2
-    
-    def predict(self, kern_pred, kern_full, coh=True):
-        N = len(self.freqs)
-        K = self.K_comb(self.freqs, kern_full)
-        diag.add(K, self.noise_var)
-        Wi, LW, LWi, W_logdet = pdinv(K)
-        alpha, _ = dpotrs(LW, self.Y_all, lower=1)
-        if coh:
-            K_p = np.zeros_like(K)
-            K_p[:N,:N] = kern_pred.K(self.freqs)
-            K_p[N:,N:] = kern_pred.K(self.freqs)
-            K_p[:N,N:] = kern_pred.K(self.freqs)
-            K_p[N:,:N] = kern_pred.K(self.freqs)
-            y_mean = K_p.T.dot(alpha)[:N,:]
-            v, _ = dpotrs(LW, K_p, lower=1)
-            y_cov = (K_p - K_p.T.dot(v))[:N,:N]
-            y_mean = np.array([np.random.multivariate_normal(y_mean[:,i], y_cov) for i in range(y_mean.shape[1])]).T
-            y_mean_complex = y_mean[:,:y_mean.shape[1]//2] + 1j*y_mean[:,y_mean.shape[1]//2:]
-            data_pred = self.data1.copy()
-            data_pred.data = y_mean_complex
-            return data_pred
-        else:
-            K_p = np.zeros_like(K)
-            K_p[:N,:N] = kern_pred.K(self.freqs)
-            K_p[N:,N:] = kern_pred.K(self.freqs)
-            y_mean = K_p.T.dot(alpha)
-            v, _ = dpotrs(LW, K_p, lower=1)
-            y_cov = K_p - K_p.T.dot(v)
-            y_mean = np.array([np.random.multivariate_normal(y_mean[:,i], y_cov) for i in range(y_mean.shape[1])]).T
             y_mean1 = y_mean[:N,:]
             y_mean2 = y_mean[N:,:]
             y_mean1_complex = y_mean1[:,:y_mean1.shape[1]//2] + 1j*y_mean1[:,y_mean1.shape[1]//2:]
@@ -210,14 +175,39 @@ class SharedVisSampler:
             data_pred2.data = y_mean2_complex
             return data_pred1, data_pred2
 
+    def unpack_name(self, pred_name, kern_full, coh=True):
+        if any('.' in s for s in self.param_names[(not coh)*1]):
+            if type(pred_name) == str:
+                kern_pred = getattr(kern_full[(not coh)*1], pred_name)
+            else:
+                pred_list = []
+                for pred in pred_name:
+                    pred_list.append(getattr(kern_full[(not coh)*1], pred))
+                kern_pred = GPy.kern.Add(pred_list)
+        else:
+            kern_pred = kern_full[(not coh)*1]
+        return kern_pred
+
+    def kern_from_name(self, pred_name, kern_full, coh=True):
+        if coh==True or coh==False:
+            kern_pred = self.unpack_name(pred_name, kern_full, coh=coh)
+        else:
+            pred_coh = pred_name[0]
+            pred_inc = pred_name[1]
+            kern_pred_coh = self.unpack_name(pred_coh, kern_full, coh=True)
+            kern_pred_inc = self.unpack_name(pred_inc, kern_full, coh=False)
+            kern_pred = (kern_pred_coh, kern_pred_inc)
+        return kern_pred
+            
     def predict_dist(self, pred_name, kern_full, coh=True, n_pick=10, subtract_from=None):
         N = len(self.freqs)
         K = self.K_comb(self.freqs, kern_full)
-        diag.add(K, self.noise_var)
+        K[:N,:N] += self.noise1_var*np.eye(N)
+        K[N:,N:] += self.noise2_var*np.eye(N)
         Wi, LW, LWi, W_logdet = pdinv(K)
         alpha, _ = dpotrs(LW, self.Y_all, lower=1)
         kern_pred = self.kern_from_name(pred_name, kern_full, coh=coh)
-        if coh:
+        if coh==True:
             K_p = np.zeros_like(K)
             K_p[:N,:N] = kern_pred.K(self.freqs)
             K_p[N:,N:] = kern_pred.K(self.freqs)
@@ -233,10 +223,15 @@ class SharedVisSampler:
             for i in range(n_pick):
                 data_pred[i].data = y_mean_complex[i]
             if subtract_from is not None:
-                for i in range(n_pick):
-                    data_pred[i].data = subtract_from.data - data_pred[i].data
-            return data_pred
-        else:
+                if type(subtract_from) == list:
+                    for i in range(n_pick):
+                        data_pred[i] = (data_pred[i].copy(),data_pred[i].copy())
+                        data_pred[i][0].data = subtract_from[0].data - data_pred[i][0].data
+                        data_pred[i][1].data = subtract_from[1].data - data_pred[i][1].data
+                else:
+                    for i in range(n_pick):
+                        data_pred[i].data = subtract_from.data - data_pred[i].data
+        elif coh==False:
             K_p = np.zeros_like(K)
             K_p[:N,:N] = kern_pred.K(self.freqs)
             K_p[N:,N:] = kern_pred.K(self.freqs)
@@ -257,21 +252,33 @@ class SharedVisSampler:
                 for i in range(n_pick):
                     data_pred[i][0].data = subtract_from[0].data - data_pred[i][0].data
                     data_pred[i][1].data = subtract_from[1].data - data_pred[i][1].data
-            return data_pred
-
-    def kern_from_name(self, pred_name, kern_full, coh=True):
-        if any('.' in s for s in self.param_names[(not coh)*1]):
-            if type(pred_name) == str:
-                kern_pred = getattr(kern_full[(not coh)*1], pred_name)
-            else:
-                pred_list = []
-                for pred in pred_name:
-                    pred_list.append(getattr(kern_full[(not coh)*1], pred))
-                kern_pred = GPy.kern.Add(pred_list)
         else:
-            kern_pred = kern_full[(not coh)*1]
-        return kern_pred
-    
+            K_p = np.zeros_like(K)
+            K_p[:N,:N] = kern_pred[0].K(self.freqs)
+            K_p[N:,N:] = kern_pred[0].K(self.freqs)
+            K_p[:N,N:] = kern_pred[0].K(self.freqs)
+            K_p[N:,:N] = kern_pred[0].K(self.freqs)
+            K_p[:N,:N] += kern_pred[1].K(self.freqs)
+            K_p[N:,N:] += kern_pred[1].K(self.freqs)
+            y_mean = K_p.T.dot(alpha)
+            v, _ = dpotrs(LW, K_p, lower=1)
+            y_cov = K_p - K_p.T.dot(v)
+            y_mean_gen = np.array([np.random.multivariate_normal(y_mean[:,i], y_cov, size=n_pick) for i in range(y_mean.shape[1])])
+            y_mean_gen = list(y_mean_gen.transpose((1,2,0)))
+            y_mean1 = [y[:N,:] for y in y_mean_gen]
+            y_mean2 = [y[N:,:] for y in y_mean_gen]
+            y_mean1_complex = [y[:,:y.shape[1]//2] + 1j*y[:,y.shape[1]//2:] for y in y_mean1]
+            y_mean2_complex = [y[:,:y.shape[1]//2] + 1j*y[:,y.shape[1]//2:] for y in y_mean2]
+            data_pred = [(self.data1.copy(),self.data2.copy()) for i in range(n_pick)]
+            for i in range(n_pick):
+                data_pred[i][0].data = y_mean1_complex[i]
+                data_pred[i][1].data = y_mean2_complex[i]
+            if subtract_from is not None:
+                for i in range(n_pick):
+                    data_pred[i][0].data = subtract_from[0].data - data_pred[i][0].data
+                    data_pred[i][1].data = subtract_from[1].data - data_pred[i][1].data
+        return data_pred
+
     def sample_cubes(self, pred_name, coh=True, discard=100, n_pick=10, subtract_from=None):
         samples_left = self.result.get_chain(discard=discard)
         flat_samples = samples_left.reshape(-1, samples_left.shape[-1])
@@ -282,14 +289,7 @@ class SharedVisSampler:
         for i in range(n_pick):
             theta = picked_samples[i,:]
             kerns_theta = self.set_params(theta, self.kerns)
-            kern_pred = self.kern_from_name(pred_name, kerns_theta, coh=coh)
-            cube = self.predict(kern_pred, kerns_theta, coh=coh)
-            if subtract_from is not None:
-                if coh:
-                    cube.data = subtract_from.data - cube.data
-                else:
-                    cube[0].data = subtract_from[0].data - cube[0].data
-                    cube[1].data = subtract_from[1].data - cube[1].data
+            cube = self.predict_dist(pred_name, kerns_theta, coh=coh, n_pick=1, subtract_from=subtract_from)[0]
             cubes.append(cube)
             bar.update(1)
         return cubes
@@ -301,7 +301,7 @@ class SharedVisSampler:
         else:
             print('Sampling from hyperparameter distribution')
             cubes = self.sample_cubes(pred_name, coh=coh, discard=discard, n_pick=n_pick, subtract_from=subtract_from)
-        if coh:
+        if coh==True and type(subtract_from) != list:
             ps = []
             for i in range(n_pick):
                 ps.append(ps_gen.get_ps3d(kbins, cubes[i]))
@@ -320,10 +320,12 @@ class SharedVisSampler:
     
     def get_ps2d(self, ps_gen, pred_name, coh=True, kind='dist', discard=100, n_pick=10, subtract_from=None):
         if kind == 'dist':
+            print('Sampling from GP posterior')
             cubes = self.predict_dist(pred_name, self.kerns, coh=coh, n_pick=n_pick, subtract_from=subtract_from)
         else:
+            print('Sampling from hyperparameter distribution')
             cubes = self.sample_cubes(pred_name, coh=coh, discard=discard, n_pick=n_pick, subtract_from=subtract_from)
-        if coh:
+        if coh==True and type(subtract_from) != list:
             ps = []
             for i in range(n_pick):
                 ps.append(ps_gen.get_ps2d(cubes[i]))
