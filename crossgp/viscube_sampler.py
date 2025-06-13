@@ -132,7 +132,7 @@ class SharedVisSampler:
         return log_marginal
 
     def set_params(self, thetas, kerns):
-        kerns = [kerns[0].copy(), kerns[1].copy()]
+        kerns = [kerns[0], kerns[1]]
         thetas = [thetas[:self.N_theta1],thetas[self.N_theta1:]]
         for i in range(2):
             if any('.' in s for s in self.param_names[i]):
