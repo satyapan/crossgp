@@ -84,6 +84,7 @@ def is_positive_definite(B):
         return False
 
 
+
 class SharedVisSampler:
     def __init__(self, data_nights, kerns, noise_nights, param_names, prior_bounds):
         self.data1 = data_nights[0]
@@ -100,6 +101,8 @@ class SharedVisSampler:
         self.noise1_var = noise_nights[0].data.real.var()
         self.noise2_var = noise_nights[1].data.real.var()
         self.result = None
+        self.discard = None
+        self.posterior_samples = None
         
     def K_comb(self, X, kerns):
         N = len(X)
@@ -163,15 +166,38 @@ class SharedVisSampler:
             return -np.inf
         return lp + self.log_likelihood(thetas)
 
-    def run_sampler(self, nwalkers=50, nsteps=200, discard=100):
+    def run_sampler(self, nwalkers=50, nsteps=200, discard=100, emcee_moves='stretch'):
+        if emcee_moves == 'stretch':
+            moves = emcee.moves.StretchMove()
+        elif emcee_moves == 'kde':
+            moves = emcee.moves.KDEMove()
         p0 = [np.array([prior.rvs(1)[0] for prior in self.prior_bounds]) for _ in range(nwalkers)]
-        sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior)
+        sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior, moves=moves)
         sampler.run_mcmc(p0, nsteps, progress=True)
         self.result =  sampler
-        self.posterior_samples = sampler.get_chain(discard=discard, flat=True)
+        self.plot_samples()
+        self.discard = discard
+        self.posterior_samples, _ = self.clip_outliers(discard)
         self.update_model_with_posterior_mean()
         self.print_posterior_means()
         self.plot_corner()
+
+    def clip_outliers(self, discard, clip_nsigma=6, discard_walkers_nsigma=10):
+        samples = self.result.get_chain(discard=discard)
+        log_prob = self.result.get_log_prob(discard=discard)
+        max_log_prob = log_prob.max(axis=0)
+        mask = max_log_prob > np.median(max_log_prob) - discard_walkers_nsigma * np.median(log_prob.std(axis=0))
+        if (~mask).sum() > 0:
+            print(f'Discarding {(~mask).sum()} walkers')
+        samples = samples[:, mask, :].reshape(-1, samples.shape[-1])        
+        log_prob = log_prob[:, mask].flatten()
+        samples_outliers = np.zeros_like(samples)
+        for i in range(samples.shape[1]):
+            m = np.median(samples[:, i])
+            s = psutil.robust_std(samples[:, i])
+            samples_outliers[abs(samples[:, i] - m) > clip_nsigma * s, i] = 1
+        mask = (samples_outliers.sum(axis=1) == 0)
+        return samples[mask], log_prob[mask]
         
     def update_model_with_posterior_mean(self):
         mean_vals = np.mean(self.posterior_samples, axis=0)
@@ -181,6 +207,24 @@ class SharedVisSampler:
         mean_vals = np.mean(self.posterior_samples, axis=0)
         for name, val in zip(self.param_names_flat, mean_vals):
             print(f"Posterior mean {name}: {val}")
+
+    def plot_samples(self):
+        chain = self.result.chain
+        shape = chain.shape
+        ncols=4
+        nrows = int(np.ceil((self.ndim + 1) / ncols))
+        fig,ax = plt.subplots(nrows=nrows, ncols=ncols, figsize=(12, 1 + 2.2 * nrows), sharex=True)
+        for i in range(shape[2]):
+            if 'variance' in self.param_names_flat[i]:
+                ax[i//ncols,i%ncols].set_yscale('log')
+            ax[i//ncols,i%ncols].text(0.01, 0.95, self.param_names_flat[i]+'=%.4f'%(np.median(chain[:,:,i])), transform=ax[i//ncols,i%ncols].transAxes, fontsize=9, va='top', ha='left')
+            for j in range(shape[0]):
+                ax[i//ncols,i%ncols].plot(chain[j,:,i], color='tab:orange', alpha=0.6)
+        log_prob = self.result.get_log_prob()
+        for j in range(shape[0]):
+            ax[self.ndim//ncols, self.ndim%ncols].plot(log_prob[:,j], color='tab:orange', alpha=0.6)
+        ax[self.ndim//ncols, self.ndim%ncols].text(0.01, 0.95, 'likelihood=%.4f'%(np.median(log_prob)), transform=ax[self.ndim//ncols, self.ndim%ncols].transAxes, fontsize=9, va='top', ha='left')
+    
 
     def plot_corner(self):
         corner.corner(self.posterior_samples, labels=self.param_names_flat)
@@ -328,9 +372,10 @@ class SharedVisSampler:
                     data_pred[i][1].data = subtract_from[1].data - data_pred[i][1].data
         return data_pred
 
-    def sample_cubes(self, pred_name, coh=True, discard=100, n_pick=100, subtract_from=None):
-        samples_left = self.result.get_chain(discard=discard)
-        flat_samples = samples_left.reshape(-1, samples_left.shape[-1])
+    def sample_cubes(self, pred_name, coh=True, discard=None, n_pick=100, subtract_from=None):
+        if discard is None:
+            discard=self.discard
+        flat_samples, _ = self.clip_outliers(discard)
         idx = np.random.choice(flat_samples.shape[0], size=n_pick, replace=False)
         picked_samples = flat_samples[idx]
         cubes = []
@@ -343,7 +388,9 @@ class SharedVisSampler:
             bar.update(1)
         return cubes
     
-    def get_ps3d(self, ps_gen, kbins, pred_name, coh=True, kind='dist', discard=100, n_pick=100, subtract_from=None):
+    def get_ps3d(self, ps_gen, kbins, pred_name, coh=True, kind='dist', discard=None, n_pick=100, subtract_from=None):
+        if discard is None:
+            discard=self.discard
         if kind == 'dist':
             print('Sampling from GP posterior')
             cubes = self.predict_dist(pred_name, self.kerns, coh=coh, n_pick=n_pick, subtract_from=subtract_from)
@@ -367,7 +414,9 @@ class SharedVisSampler:
             ps2 = pspec.SphericalPowerSpectraMC(ps2)
             return ps1, ps2
     
-    def get_ps2d(self, ps_gen, pred_name, coh=True, kind='dist', discard=100, n_pick=100, subtract_from=None):
+    def get_ps2d(self, ps_gen, pred_name, coh=True, kind='dist', discard=None, n_pick=100, subtract_from=None):
+        if discard is None:
+            discard=self.discard
         if kind == 'dist':
             print('Sampling from GP posterior')
             cubes = self.predict_dist(pred_name, self.kerns, coh=coh, n_pick=n_pick, subtract_from=subtract_from)
