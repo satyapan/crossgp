@@ -40,6 +40,49 @@ class Log10Uniform(GPy.core.parameterization.priors.Prior):
         return 10 ** np.random.uniform(self.lower, self.upper, size=n)
 
 
+def nearest_postive_definite(A, maxtries=10):
+    """Find the nearest positive-definite matrix to input
+
+    A Python/Numpy port of John D'Errico's `nearestSPD` MATLAB code [1], which
+    credits [2].
+
+    [1] https://www.mathworks.com/matlabcentral/fileexchange/42885-nearestspd
+
+    [2] N.J. Higham, "Computing a nearest symmetric positive semidefinite
+    matrix" (1988): https://doi.org/10.1016/0024-3795(88)90223-6
+    """
+    B = (A + A.T) / 2
+    _, s, V = np.linalg.svd(B)
+
+    H = np.dot(V.T, np.dot(np.diag(s), V))
+
+    A2 = (B + H) / 2
+
+    A3 = (A2 + A2.T) / 2
+
+    if is_positive_definite(A3):
+        return A3
+
+    spacing = np.spacing(np.linalg.norm(A))
+    I = np.eye(A.shape[0])
+    k = 1
+    while not is_positive_definite(A3):
+        mineig = np.min(np.real(np.linalg.eigvals(A3)))
+        A3 += I * (-mineig * k**2 + spacing)
+        k += 1
+        if k > maxtries:
+            break
+
+    return A3
+
+def is_positive_definite(B):
+    """Returns true when input is positive-definite, via Cholesky"""
+    try:
+        _ = GPy.util.linalg.jitchol(B, 0)
+        return True
+    except np.linalg.LinAlgError:
+        return False
+
 
 class SharedVisSampler:
     def __init__(self, data_nights, kerns, noise_nights, param_names, prior_bounds):
@@ -199,7 +242,7 @@ class SharedVisSampler:
             kern_pred = (kern_pred_coh, kern_pred_inc)
         return kern_pred
             
-    def predict_dist(self, pred_name, kern_full, coh=True, n_pick=10, subtract_from=None):
+    def predict_dist(self, pred_name, kern_full, coh=True, n_pick=100, subtract_from=None):
         N = len(self.freqs)
         K = self.K_comb(self.freqs, kern_full)
         K[:N,:N] += self.noise1_var*np.eye(N)
@@ -216,8 +259,10 @@ class SharedVisSampler:
             y_mean = K_p.T.dot(alpha)[:N,:]
             v, _ = dpotrs(LW, K_p, lower=1)
             y_cov = (K_p - K_p.T.dot(v))[:N,:N]
-            y_mean_gen = np.array([np.random.multivariate_normal(y_mean[:,i], y_cov, size=n_pick) for i in range(y_mean.shape[1])])
-            y_mean_gen = list(y_mean_gen.transpose((1,2,0)))
+            if not is_positive_definite(y_cov):
+                y_cov = nearest_postive_definite(y_cov)
+            y_cov_samples = np.transpose(np.random.multivariate_normal(np.zeros(N), y_cov, size=(y_mean.shape[1],n_pick)), axes=(1,2,0))
+            y_mean_gen = list(y_mean[None,:,:]+y_cov_samples)
             y_mean_complex = [y[:,:y.shape[1]//2] + 1j*y[:,y.shape[1]//2:] for y in y_mean_gen]
             data_pred = [self.data1.copy() for i in range(n_pick)]
             for i in range(n_pick):
@@ -238,8 +283,10 @@ class SharedVisSampler:
             y_mean = K_p.T.dot(alpha)
             v, _ = dpotrs(LW, K_p, lower=1)
             y_cov = K_p - K_p.T.dot(v)
-            y_mean_gen = np.array([np.random.multivariate_normal(y_mean[:,i], y_cov, size=n_pick) for i in range(y_mean.shape[1])])
-            y_mean_gen = list(y_mean_gen.transpose((1,2,0)))
+            if not is_positive_definite(y_cov):
+                y_cov = nearest_postive_definite(y_cov)
+            y_cov_samples = np.transpose(np.random.multivariate_normal(np.zeros(2*N), y_cov, size=(y_mean.shape[1],n_pick)), axes=(1,2,0))
+            y_mean_gen = list(y_mean[None,:,:]+y_cov_samples)
             y_mean1 = [y[:N,:] for y in y_mean_gen]
             y_mean2 = [y[N:,:] for y in y_mean_gen]
             y_mean1_complex = [y[:,:y.shape[1]//2] + 1j*y[:,y.shape[1]//2:] for y in y_mean1]
@@ -263,8 +310,10 @@ class SharedVisSampler:
             y_mean = K_p.T.dot(alpha)
             v, _ = dpotrs(LW, K_p, lower=1)
             y_cov = K_p - K_p.T.dot(v)
-            y_mean_gen = np.array([np.random.multivariate_normal(y_mean[:,i], y_cov, size=n_pick) for i in range(y_mean.shape[1])])
-            y_mean_gen = list(y_mean_gen.transpose((1,2,0)))
+            if not is_positive_definite(y_cov):
+                y_cov = nearest_postive_definite(y_cov)
+            y_cov_samples = np.transpose(np.random.multivariate_normal(np.zeros(2*N), y_cov, size=(y_mean.shape[1],n_pick)), axes=(1,2,0))
+            y_mean_gen = list(y_mean[None,:,:]+y_cov_samples)
             y_mean1 = [y[:N,:] for y in y_mean_gen]
             y_mean2 = [y[N:,:] for y in y_mean_gen]
             y_mean1_complex = [y[:,:y.shape[1]//2] + 1j*y[:,y.shape[1]//2:] for y in y_mean1]
@@ -279,7 +328,7 @@ class SharedVisSampler:
                     data_pred[i][1].data = subtract_from[1].data - data_pred[i][1].data
         return data_pred
 
-    def sample_cubes(self, pred_name, coh=True, discard=100, n_pick=10, subtract_from=None):
+    def sample_cubes(self, pred_name, coh=True, discard=100, n_pick=100, subtract_from=None):
         samples_left = self.result.get_chain(discard=discard)
         flat_samples = samples_left.reshape(-1, samples_left.shape[-1])
         idx = np.random.choice(flat_samples.shape[0], size=n_pick, replace=False)
@@ -294,7 +343,7 @@ class SharedVisSampler:
             bar.update(1)
         return cubes
     
-    def get_ps3d(self, ps_gen, kbins, pred_name, coh=True, kind='dist', discard=100, n_pick=10, subtract_from=None):
+    def get_ps3d(self, ps_gen, kbins, pred_name, coh=True, kind='dist', discard=100, n_pick=100, subtract_from=None):
         if kind == 'dist':
             print('Sampling from GP posterior')
             cubes = self.predict_dist(pred_name, self.kerns, coh=coh, n_pick=n_pick, subtract_from=subtract_from)
@@ -318,7 +367,7 @@ class SharedVisSampler:
             ps2 = pspec.SphericalPowerSpectraMC(ps2)
             return ps1, ps2
     
-    def get_ps2d(self, ps_gen, pred_name, coh=True, kind='dist', discard=100, n_pick=10, subtract_from=None):
+    def get_ps2d(self, ps_gen, pred_name, coh=True, kind='dist', discard=100, n_pick=100, subtract_from=None):
         if kind == 'dist':
             print('Sampling from GP posterior')
             cubes = self.predict_dist(pred_name, self.kerns, coh=coh, n_pick=n_pick, subtract_from=subtract_from)
