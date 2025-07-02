@@ -178,6 +178,104 @@ class DiagSampler:
         corner.corner(self.posterior_samples, labels=self.param_names_flat)
 
 
+class SharedDiagSampler:
+    def __init__(self, freqs, Y_all, kerns, noise_var, param_names, prior_bounds):
+        self.freqs = freqs
+        self.Y_all = Y_all
+        self.kerns = [kerns[0].copy(),kerns[1].copy()]
+        self.param_names = param_names
+        self.prior_bounds = prior_bounds
+        self.ndim = len(param_names)
+        self.noise_var = noise_var
+        self.models = None
+        
+    def K_comb(self, X):
+        N = len(X)
+        kern1, kern2 = self.kerns
+        K1 = kern1.K(X)
+        K2 = kern2.K(X)
+        K = np.zeros((2*N,2*N))
+        K[:N,:N] = K1
+        K[N:,N:] = K2
+        return K
+
+    def lml(self, X, Y):
+        N = len(X)
+        m = 0
+        YYT_factor = Y-m
+        K = self.K_comb(X)
+        Ky = K.copy()
+        diag.add(Ky, self.noise_var+1e-8)
+        Wi, LW, LWi, W_logdet = pdinv(Ky)
+        alpha, _ = dpotrs(LW, YYT_factor, lower=1)
+        log_marginal =  0.5*(-Y.size * log_2_pi - Y.shape[1] * W_logdet - np.sum(alpha * YYT_factor))
+        return log_marginal
+        
+    def set_params(self, thetas, kerns):
+        if len(thetas) == 1:
+            for i in range(2):
+                setattr(kerns[i], self.param_names[0], thetas[0])
+        else:
+            for i in range(2):
+                for j in range(len(self.param_names)):
+                    parts = self.param_names[j].split('.')
+                    attr = getattr(kerns[i],parts[0])
+                    setattr(attr, parts[1], thetas[j])
+        return kerns
+
+    def log_likelihood(self, thetas):
+        self.kerns = self.set_params(thetas, self.kerns)
+        return self.lml(self.freqs, self.Y_all)
+
+    def log_prior(self, thetas):
+        for val, (low, high) in zip(thetas, self.prior_bounds):
+            if not (low < val < high):
+                return -np.inf
+        return 0.0
+
+    def log_posterior(self, thetas):
+        lp = self.log_prior(thetas)
+        if not np.isfinite(lp):
+            return -np.inf
+        return lp + self.log_likelihood(thetas)
+
+    def run_sampler(self, initial_position, nwalkers=50, nsteps=50, discard=10):
+        p0 = [initial_position + 0.1 * np.random.randn(self.ndim) for _ in range(nwalkers)]
+        sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior)
+        sampler.run_mcmc(p0, nsteps, progress=True)
+        self.posterior_samples = sampler.get_chain(discard=discard, flat=True)
+        self.update_model_with_posterior_mean()
+        self.print_posterior_means()
+        self.plot_corner()
+        self.models = [GPy.models.GPRegression(self.freqs, self.Y_all[:len(self.freqs),:], kernel=self.kerns[0]),GPy.models.GPRegression(self.freqs, self.Y_all[len(self.freqs):,:], kernel=self.kerns[1])]
+
+    def update_model_with_posterior_mean(self):
+        mean_vals = np.mean(self.posterior_samples, axis=0)
+        self.set_params(mean_vals, self.kerns)
+
+    def print_posterior_means(self):
+        mean_vals = np.mean(self.posterior_samples, axis=0)
+        for name, val in zip(self.param_names, mean_vals):
+            print(f"Posterior mean {name}: {val}")
+
+    def plot_corner(self):
+        corner.corner(self.posterior_samples, labels=self.param_names)
+        
+    def predict(self, kern_pred):
+        K_p = kern_pred.K(self.freqs)
+        K = self.kerns[0].K(self.freqs)
+        diag.add(K, self.noise_var)
+        Wi, LW, LWi, W_logdet = pdinv(K)
+        alpha1, _ = dpotrs(LW, self.Y_all[:len(self.freqs),:], lower=1)
+        y_mean1 = K_p.T.dot(alpha1)
+        alpha2, _ = dpotrs(LW, self.Y_all[len(self.freqs):,:], lower=1)
+        y_mean2 = K_p.T.dot(alpha2)
+        K_full = self.K_comb(self.freqs)
+        diag.add(K_full, self.noise_var)
+        Wi, LW, LWi, W_logdet = pdinv(K_full)
+        v, _ = dpotrs(LW, np.vstack((K_p,K_p)), lower=1)
+        y_cov = K_p - np.vstack((K_p,K_p)).T.dot(v)
+        return y_mean1, y_mean2, y_cov
 
 
 class SharedSampler:
