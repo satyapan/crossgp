@@ -241,7 +241,7 @@ class SharedDiagSampler:
 
     def run_sampler(self, initial_position, nwalkers=50, nsteps=50, discard=10):
         p0 = [initial_position + 0.1 * np.random.randn(self.ndim) for _ in range(nwalkers)]
-        sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior)
+        sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior, moves=emcee.moves.KDEMove())
         sampler.run_mcmc(p0, nsteps, progress=True)
         self.posterior_samples = sampler.get_chain(discard=discard, flat=True)
         self.update_model_with_posterior_mean()
