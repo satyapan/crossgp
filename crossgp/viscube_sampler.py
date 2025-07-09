@@ -285,8 +285,20 @@ class SharedVisSampler:
             kern_pred_inc = self.unpack_name(pred_inc, kern_full, coh=False)
             kern_pred = (kern_pred_coh, kern_pred_inc)
         return kern_pred
+    
+    def combine_cubes(self, cube1, cube2):
+        if cube1.weights == None or cube2.weights == None:
+            cube_comb = cube1.copy()
+            cube_comb.data = (cube1.data+cube2.data)/2
+        else:
+            weights = cube1.weights.data+cube2.weights.data
+            data = (cube1.data*cube1.weights.data+cube2.data*cube2.weights.data)/weights
+            cube_comb = cube1.copy()
+            cube_comb.data = data
+            cube_comb.weights.data = weights
+        return cube_comb
             
-    def predict_dist(self, pred_name, kern_full, coh=True, n_pick=100, subtract_from=None):
+    def predict_dist(self, pred_name, kern_full, coh=True, n_pick=100, subtract_from=None, combine=False):
         N = len(self.freqs)
         K = self.K_comb(self.freqs, kern_full)
         K[:N,:N] += self.noise1_var*np.eye(N)
@@ -317,6 +329,9 @@ class SharedVisSampler:
                         data_pred[i] = (data_pred[i].copy(),data_pred[i].copy())
                         data_pred[i][0].data = subtract_from[0].data - data_pred[i][0].data
                         data_pred[i][1].data = subtract_from[1].data - data_pred[i][1].data
+                    if combine == True:
+                        for i in range(n_pick):
+                            data_pred[i] = self.combine_cubes(data_pred[i][0], data_pred[i][1])
                 else:
                     for i in range(n_pick):
                         data_pred[i].data = subtract_from.data - data_pred[i].data
@@ -343,6 +358,9 @@ class SharedVisSampler:
                 for i in range(n_pick):
                     data_pred[i][0].data = subtract_from[0].data - data_pred[i][0].data
                     data_pred[i][1].data = subtract_from[1].data - data_pred[i][1].data
+            if combine == True:
+                for i in range(n_pick):
+                    data_pred[i] = self.combine_cubes(data_pred[i][0], data_pred[i][1])
         else:
             K_p = np.zeros_like(K)
             K_p[:N,:N] = kern_pred[0].K(self.freqs)
@@ -370,9 +388,12 @@ class SharedVisSampler:
                 for i in range(n_pick):
                     data_pred[i][0].data = subtract_from[0].data - data_pred[i][0].data
                     data_pred[i][1].data = subtract_from[1].data - data_pred[i][1].data
+            if combine == True:
+                for i in range(n_pick):
+                    data_pred[i] = self.combine_cubes(data_pred[i][0], data_pred[i][1])
         return data_pred
 
-    def sample_cubes(self, pred_name, coh=True, discard=None, n_pick=100, subtract_from=None):
+    def sample_cubes(self, pred_name, coh=True, discard=None, n_pick=100, subtract_from=None, combine=False):
         if discard is None:
             discard=self.discard
         flat_samples, _ = self.clip_outliers(discard)
@@ -383,21 +404,21 @@ class SharedVisSampler:
         for i in range(n_pick):
             theta = picked_samples[i,:]
             kerns_theta = self.set_params(theta, self.kerns)
-            cube = self.predict_dist(pred_name, kerns_theta, coh=coh, n_pick=1, subtract_from=subtract_from)[0]
+            cube = self.predict_dist(pred_name, kerns_theta, coh=coh, n_pick=1, subtract_from=subtract_from, combine=combine)[0]
             cubes.append(cube)
             bar.update(1)
         return cubes
     
-    def get_ps3d(self, ps_gen, kbins, pred_name, coh=True, kind='dist', discard=None, n_pick=100, subtract_from=None):
+    def get_ps3d(self, ps_gen, kbins, pred_name, coh=True, kind='dist', discard=None, n_pick=100, subtract_from=None, combine=False):
         if discard is None:
             discard=self.discard
         if kind == 'dist':
             print('Sampling from GP posterior')
-            cubes = self.predict_dist(pred_name, self.kerns, coh=coh, n_pick=n_pick, subtract_from=subtract_from)
+            cubes = self.predict_dist(pred_name, self.kerns, coh=coh, n_pick=n_pick, subtract_from=subtract_from, combine=combine)
         else:
             print('Sampling from hyperparameter distribution')
-            cubes = self.sample_cubes(pred_name, coh=coh, discard=discard, n_pick=n_pick, subtract_from=subtract_from)
-        if coh==True and type(subtract_from) != list:
+            cubes = self.sample_cubes(pred_name, coh=coh, discard=discard, n_pick=n_pick, subtract_from=subtract_from, combine=combine)
+        if (coh==True and type(subtract_from) != list) or combine==True:
             ps = []
             for i in range(n_pick):
                 ps.append(ps_gen.get_ps3d(kbins, cubes[i]))
@@ -414,16 +435,16 @@ class SharedVisSampler:
             ps2 = pspec.SphericalPowerSpectraMC(ps2)
             return ps1, ps2
     
-    def get_ps2d(self, ps_gen, pred_name, coh=True, kind='dist', discard=None, n_pick=100, subtract_from=None):
+    def get_ps2d(self, ps_gen, pred_name, coh=True, kind='dist', discard=None, n_pick=100, subtract_from=None, combine=False):
         if discard is None:
             discard=self.discard
         if kind == 'dist':
             print('Sampling from GP posterior')
-            cubes = self.predict_dist(pred_name, self.kerns, coh=coh, n_pick=n_pick, subtract_from=subtract_from)
+            cubes = self.predict_dist(pred_name, self.kerns, coh=coh, n_pick=n_pick, subtract_from=subtract_from, combine=combine)
         else:
             print('Sampling from hyperparameter distribution')
-            cubes = self.sample_cubes(pred_name, coh=coh, discard=discard, n_pick=n_pick, subtract_from=subtract_from)
-        if coh==True and type(subtract_from) != list:
+            cubes = self.sample_cubes(pred_name, coh=coh, discard=discard, n_pick=n_pick, subtract_from=subtract_from, combine=combine)
+        if (coh==True and type(subtract_from) != list) or combine==True:
             ps = []
             for i in range(n_pick):
                 ps.append(ps_gen.get_ps2d(cubes[i]))
