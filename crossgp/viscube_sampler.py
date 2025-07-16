@@ -227,7 +227,7 @@ class SharedVisSampler:
     
 
     def plot_corner(self):
-        corner.corner(self.posterior_samples, labels=self.param_names_flat)
+        corner.corner(self.posterior_samples, labels=self.param_names_flat, smooth=1)
 
     def posterior_mean(self, kern_pred, coh=True):
         N = len(self.freqs)
