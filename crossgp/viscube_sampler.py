@@ -86,6 +86,16 @@ def is_positive_definite(B):
 
 
 class SharedVisSampler:
+    """
+    Perform GPR on two visibility cubes with linked hyperparameters with cross-covariances
+
+    Arguments:
+    data_nights (list): List of two ps_eor.datacube.CartDataCube objects, corresponding to first and second night data cubes.
+    kerns (list): List of two GPy.kern objects, for coherent and incoherent parts.
+    noise_nights (list): List of two ps_eor.datacube.CartDataCube objects, corresponding to first and second night noise cubes.
+    param_names (list): List of two lists, containing hyperparameter names that are optimized. First list is for coherent part and second for incoherent part.
+    prior_bounds (list): Single list of GPy.prior objects, one for each hyperparameter that is optimized, in same order as param_names: coherent first, incoherent next.
+    """
     def __init__(self, data_nights, kerns, noise_nights, param_names, prior_bounds):
         self.data1 = data_nights[0]
         self.data2 = data_nights[1]
@@ -167,6 +177,15 @@ class SharedVisSampler:
         return lp + self.log_likelihood(thetas)
 
     def run_sampler(self, nwalkers=50, nsteps=200, discard=100, emcee_moves='stretch'):
+        """
+        Run MCMC.
+
+        Arguments:
+        nwalkers (int): Number of walkers
+        nsteps (int): Number of MCMC steps
+        discard (int): Number of steps to discard from the end.
+        emcee_moves (str): The moves algorithm to use in EnsembleSampler. Two options: 'stretch' and 'kde'.
+        """
         if emcee_moves == 'stretch':
             moves = emcee.moves.StretchMove()
         elif emcee_moves == 'kde':
@@ -410,6 +429,21 @@ class SharedVisSampler:
         return cubes
     
     def get_ps3d(self, ps_gen, kbins, pred_name, coh=True, kind='dist', discard=None, n_pick=100, subtract_from=None, combine=False):
+        """
+        Estimate spherical PS for components and optionally subtract from data.
+
+        Arguments:
+        ps_gen (ps_eor.pspec.PowerSpectraCart): Power spectrum generator object from ps_eor.
+        kbins (list): List of k bin edges.
+        pred_name (list): If coh=True or False, provide a single list of kernel names. If coh='mixed', provide a list of two lists: [[coherent],[incoherent]]
+        coh (bool or str): If the pred_name is - completely coherent: coh=True, completely incoherent: coh=False, contains coherent and incoherent parts: coh='mixed'
+        kind (str): Sampling method of visibility cubes. Two options - 'dist': Sample from predicitve distribution at MAP hyperparameter estimate; 'hyp': Sample from full hyperparameter posterior distribution.
+        n_pick (int): Number of visibility cubes to sample.
+        subtract_from (list): The data cube from which to subtract the specified component(s). If None, the component is returned. 
+        Otherwise, two options - 1. If one ps_eor.datacube.CartDataCube object is provided, coh must be True, and the component is subtracted from that data cube
+        2. If a list of two ps_eor.datacube.CartDataCube objects are provided, same coherent component is subtracted from both cubes, separate incoherent components are subtracted from the two cubes.
+        combine (bool): If True, ps for average cubes for two nights is returned.
+        """
         if discard is None:
             discard=self.discard
         if kind == 'dist':
@@ -436,6 +470,20 @@ class SharedVisSampler:
             return ps1, ps2
     
     def get_ps2d(self, ps_gen, pred_name, coh=True, kind='dist', discard=None, n_pick=100, subtract_from=None, combine=False):
+        """
+        Estimate cylindrical PS for components and optionally subtract from data.
+
+        Arguments:
+        ps_gen (ps_eor.pspec.PowerSpectraCart): Power spectrum generator object from ps_eor.
+        pred_name (list): If coh=True or False, provide a single list of kernel names. If coh='mixed', provide a list of two lists: [[coherent],[incoherent]]
+        coh (bool or str): If the pred_name is - completely coherent: coh=True, completely incoherent: coh=False, contains coherent and incoherent parts: coh='mixed'
+        kind (str): Sampling method of visibility cubes. Two options - 'dist': Sample from predicitve distribution at MAP hyperparameter estimate; 'hyp': Sample from full hyperparameter posterior distribution.
+        n_pick (int): Number of visibility cubes to sample.
+        subtract_from (list): The data cube from which to subtract the specified component(s). If None, the component is returned. 
+        Otherwise, two options - 1. If one ps_eor.datacube.CartDataCube object is provided, coh must be True, and the component is subtracted from that data cube
+        2. If a list of two ps_eor.datacube.CartDataCube objects are provided, same coherent component is subtracted from both cubes, separate incoherent components are subtracted from the two cubes.
+        combine (bool): If True, ps for average cubes for two nights is returned.
+        """
         if discard is None:
             discard=self.discard
         if kind == 'dist':
