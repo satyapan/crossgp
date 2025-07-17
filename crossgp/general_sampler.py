@@ -11,6 +11,17 @@ from GPy.core.parameterization.priors import Uniform
 log_2_pi = np.log(2*np.pi)
 
 class GPHyperparameterSampler:
+    """
+    Perform GPR on a single data set
+
+    Arguments:
+    freqs (list): List of frequencies (can be any domain)
+    Y_all (array): Multiple realizations of input signal, stacked horizontally
+    kernel (GPy.kern): The GP kernel
+    noise_variance (float): The noise variance
+    param_names (list): List of strings containing the hyperparameters that are optimized
+    prior_bounds (list): List of tuples containing uniform prior bounds    
+    """
     def __init__(self, freqs, Y_all, kernel, noise_variance, param_names, prior_bounds):
         self.freqs = freqs
         self.Y_all = Y_all
@@ -54,6 +65,15 @@ class GPHyperparameterSampler:
         return lp + self.log_likelihood(theta)
 
     def run_sampler(self, initial_position, nwalkers=50, nsteps=50, discard=10):
+        """
+        Run MCMC.
+
+        Arguments:
+        initial_position (list): List of initial values of hyperparameters that are optimized.
+        nwalkers (int): Number of walkers
+        nsteps (int): Number of MCMC steps
+        discard (int): Number of steps to discard from the end.
+        """
         p0 = [initial_position + 0.1 * np.random.randn(self.ndim) for _ in range(nwalkers)]
         sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior)
         sampler.run_mcmc(p0, nsteps, progress=True)
@@ -90,6 +110,17 @@ class GPHyperparameterSampler:
 
 
 class DiagSampler:
+    """
+    Perform GPR on two data sets with independent hyperparameters
+
+    Arguments:
+    freqs (list): List of frequencies (can be any domain)
+    Y_all (array): Multiple realizations of input signal are stacked horizontally forming each data set. Two such data sets are vertically stacked to form Y_all.
+    kerns (list): List of two kernels, for the two datasets
+    noise_var (float): The noise variance
+    param_names (list): List of two lists, for first and second data set. Each list containes strings with names of the hyperparameters that are optimized
+    prior_bounds (list): List of tuples containing uniform prior bounds    
+    """
     def __init__(self, freqs, Y_all, kerns, noise_var, param_names, prior_bounds):
         self.freqs = freqs
         self.Y_all = Y_all
@@ -156,6 +187,15 @@ class DiagSampler:
         return lp + self.log_likelihood(thetas)
 
     def run_sampler(self, initial_position, nwalkers=50, nsteps=50, discard=10):
+        """
+        Run MCMC.
+
+        Arguments:
+        initial_position (list): List of initial values of hyperparameters that are optimized.
+        nwalkers (int): Number of walkers
+        nsteps (int): Number of MCMC steps
+        discard (int): Number of steps to discard from the end.
+        """
         p0 = [initial_position + 0.1 * np.random.randn(self.ndim) for _ in range(nwalkers)]
         sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior)
         sampler.run_mcmc(p0, nsteps, progress=True)
@@ -179,6 +219,17 @@ class DiagSampler:
 
 
 class SharedDiagSampler:
+    """
+    Perform GPR on two data sets with linked hyperparameters
+
+    Arguments:
+    freqs (list): List of frequencies (can be any domain)
+    Y_all (array): Multiple realizations of input signal are stacked horizontally forming each data set. Two such data sets are vertically stacked to form Y_all.
+    kerns (list): List of two kernels, for the two datasets
+    noise_var (float): The noise variance
+    param_names (list): List of strings containing the linked hyperparameters that are optimized
+    prior_bounds (list): List of tuples containing the linked uniform prior bounds    
+    """
     def __init__(self, freqs, Y_all, kerns, noise_var, param_names, prior_bounds):
         self.freqs = freqs
         self.Y_all = Y_all
@@ -240,6 +291,15 @@ class SharedDiagSampler:
         return lp + self.log_likelihood(thetas)
 
     def run_sampler(self, initial_position, nwalkers=50, nsteps=50, discard=10):
+        """
+        Run MCMC.
+
+        Arguments:
+        initial_position (list): List of initial values of hyperparameters that are optimized.
+        nwalkers (int): Number of walkers
+        nsteps (int): Number of MCMC steps
+        discard (int): Number of steps to discard from the end.
+        """
         p0 = [initial_position + 0.1 * np.random.randn(self.ndim) for _ in range(nwalkers)]
         sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior, moves=emcee.moves.KDEMove())
         sampler.run_mcmc(p0, nsteps, progress=True)
@@ -262,6 +322,12 @@ class SharedDiagSampler:
         corner.corner(self.posterior_samples, labels=self.param_names)
         
     def predict(self, kern_pred):
+        """
+        Predict any component.
+
+        Argument:
+        kern_pred: GPy.kern of the component to predict.
+        """
         K_p = kern_pred.K(self.freqs)
         K = self.kerns[0].K(self.freqs)
         diag.add(K, self.noise_var)
@@ -279,6 +345,18 @@ class SharedDiagSampler:
 
 
 class SharedSampler:
+    """
+    Perform GPR on two data sets with linked hyperparameters with cross-covariances
+
+    Arguments:
+    freqs (list): List of frequencies (can be any domain)
+    Y_all (array): Multiple realizations of input signal are stacked horizontally forming each data set. Two such data sets are vertically stacked to form Y_all.
+    kerns (list): List of two kernels. First is coherent and second is incoherent.
+    noise_var (float): The noise variance
+    param_names (list): List of two lists, containing hyperparameter names that are optimized. First list is for coherent and second for incoherent kernel.
+    prior_bounds (list): List of GPy.prior objects, one for each hyperparameter that is optimized, in order: coherent first, incoherent next.
+    diag (bool): If True, cross covariances are not used.
+    """
     def __init__(self, freqs, Y_all, kerns, noise_var, param_names, prior_bounds, diag=False):
         self.freqs = freqs
         self.Y_all = Y_all
@@ -354,6 +432,15 @@ class SharedSampler:
         return lp + self.log_likelihood(thetas)
 
     def run_sampler(self, initial_position, nwalkers=50, nsteps=50, discard=10):
+        """
+        Run MCMC.
+
+        Arguments:
+        initial_position (list): List of initial values of hyperparameters that are optimized.
+        nwalkers (int): Number of walkers
+        nsteps (int): Number of MCMC steps
+        discard (int): Number of steps to discard from the end.
+        """
         p0 = [initial_position + 0.001 * np.random.randn(self.ndim) for _ in range(nwalkers)]
         sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior)
         sampler.run_mcmc(p0, nsteps, progress=True)
@@ -376,6 +463,9 @@ class SharedSampler:
         corner.corner(self.posterior_samples, labels=self.param_names_flat)
         
     def predict_coh(self):
+        """
+        Predict the coherent component.
+        """
         K_p = self.kerns[0].K(self.freqs)
         K = self.K_comb(self.freqs)
         diag.add(K, self.noise_var)
@@ -387,6 +477,12 @@ class SharedSampler:
         return y_mean, y_cov
 
     def predict(self, kern_pred):
+        """
+        Predict an incoherent component.
+
+        Argument:
+        kern_pred: GPy.kern of the incoherent component to predict.
+        """
         K_p = kern_pred.K(self.freqs)
         K = (self.kerns[0]+self.kerns[1]).K(self.freqs)
         diag.add(K, self.noise_var)
