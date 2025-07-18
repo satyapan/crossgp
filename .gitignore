@@ -1,1 +1,4 @@
 crossgp/__pycache__/*
+dist/
+pyproject.toml
+poetry.lock
