@@ -1,5 +1,5 @@
 import torch
-from ps_eor import datacube, pspec, psutil, simu, fitutil, fgfit, flagger, ml_gpr
+from ps_eor import datacube, pspec, psutil
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
@@ -82,8 +82,7 @@ def is_positive_definite(B):
         return True
     except np.linalg.LinAlgError:
         return False
-
-
+    
 
 class SharedVisSampler:
     """
