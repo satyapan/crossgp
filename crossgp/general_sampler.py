@@ -10,6 +10,7 @@ from GPy.util.linalg import pdinv, dpotrs, tdot, dpotri, jitchol
 from GPy.core.parameterization.priors import Uniform
 log_2_pi = np.log(2*np.pi)
 
+from .funcs import *
 
 class SharedSampler:
     """

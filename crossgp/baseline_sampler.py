@@ -11,14 +11,16 @@ import corner
 from GPy.inference.latent_function_inference.posterior import Posterior
 from GPy.util import diag
 from GPy.util.linalg import pdinv, dpotrs, tdot, dpotri, jitchol
+import multiprocessing as mp
+import warnings
 log_2_pi = np.log(2*np.pi)
 
 from .funcs import *
-    
 
-class SharedVisSampler:
+
+class BaselineSampler:
     """
-    Perform GPR on two visibility cubes with linked hyperparameters with cross-covariances
+    Perform GPR with baseline dependent kernels
 
     Arguments:
     data_nights (list): List of two ps_eor.datacube.CartDataCube objects, corresponding to first and second night data cubes.
@@ -26,16 +28,27 @@ class SharedVisSampler:
     noise_nights (list): List of two ps_eor.datacube.CartDataCube objects, corresponding to first and second night noise cubes.
     param_names (list): List of two lists, containing hyperparameter names that are optimized. First list is for coherent part and second for incoherent part.
     prior_bounds (list): Single list of GPy.prior objects, one for each hyperparameter that is optimized, in same order as param_names: coherent first, incoherent next.
+    wedge_idx (list): List of lists. Each sublist contains two indices pointing to the angle and delay_buffer parameters that have been included in param_names.
+    umin (float): Minimum uv
+    umax (float): Maximum uv
+    uv_bins_du (float): uv bin spacing for which separate kernels are used
     """
-    def __init__(self, data_nights, kerns, noise_nights, param_names, prior_bounds):
+    def __init__(self, data_nights, kerns, noise_nights, param_names, wedge_idx, prior_bounds, umin, umax, uv_bins_du):
         self.data1 = data_nights[0]
         self.data2 = data_nights[1]
         self.freqs = self.data1.freqs.reshape(-1,1)*1e-6
+        self.mean_fmhz = np.average(self.freqs)
+        self.uv_bins = get_uv_bins(umin, umax, uv_bins_du)
+        self.uv_means = np.array([(i[0]+i[1])/2 for i in self.uv_bins])
+        self.N_bl = len(self.uv_bins)
+        self.idxs = [(self.data1.ru >= umin) & (self.data1.ru <= umax) for umin, umax in self.uv_bins]
         data_stack = np.vstack((self.data1.data, self.data2.data))
-        self.Y_all = np.hstack((data_stack.real, data_stack.imag))
-        self.kerns = [kerns[0].copy(),kerns[1].copy()]
+        data_stack_bl = [data_stack[:,self.idxs[i]] for i in range(self.N_bl)]
+        self.Y_all = [np.hstack((i.real, i.imag)) for i in data_stack_bl]
+        self.kerns = [[kerns[0].copy(),kerns[1].copy()] for i in range(self.N_bl)]
         self.param_names = param_names
         self.param_names_flat = [item for sublist in self.param_names for item in sublist]
+        self.wedge_idx = wedge_idx
         self.prior_bounds = prior_bounds
         self.ndim = len(param_names[0])+len(param_names[1])
         self.N_theta1 = len(param_names[0])
@@ -45,9 +58,9 @@ class SharedVisSampler:
         self.discard = None
         self.posterior_samples = None
         
-    def K_comb(self, X, kerns):
+    def K_comb(self, X, kern):
         N = len(X)
-        kern1, kern2 = kerns
+        kern1, kern2 = kern
         diag = kern1+kern2
         offdiag = kern1
         K1 = diag.K(X)
@@ -59,35 +72,76 @@ class SharedVisSampler:
         K[N:,:N] = K2
         return K
 
-    def lml(self, X, Y):
+    def K_bl(self, X, kerns):
+        K_bl = [self.K_comb(X, kern) for kern in kerns]
+        return K_bl
+    
+    def lml(self, X, Ys):
         N = len(X)
         m = 0
-        YYT_factor = Y-m
-        K = self.K_comb(X, self.kerns)
-        Ky = K.copy()
-        Ky[:N,:N] += self.noise1_var*np.eye(N)
-        Ky[N:,N:] += self.noise2_var*np.eye(N)
-        Wi, LW, LWi, W_logdet = pdinv(Ky)
-        alpha, _ = dpotrs(LW, YYT_factor, lower=1)
-        log_marginal =  0.5*(-Y.size * log_2_pi - Y.shape[1] * W_logdet - np.sum(alpha * YYT_factor))
+        YYT_factors = [i-m for i in Ys]
+        K_bl = self.K_bl(X, self.kerns)
+        log_marginal = 0
+        for i in range(self.N_bl):
+            K = K_bl[i]
+            YYT_factor = YYT_factors[i]
+            Y = Ys[i]
+            Ky = K.copy()
+            Ky[:N,:N] += self.noise1_var*np.eye(N)
+            Ky[N:,N:] += self.noise2_var*np.eye(N)
+            Wi, LW, LWi, W_logdet = pdinv(Ky)
+            alpha, _ = dpotrs(LW, YYT_factor, lower=1)
+            log_marginal +=  0.5*(-Y.size * log_2_pi - Y.shape[1] * W_logdet - np.sum(alpha * YYT_factor))
         return log_marginal
-
-    def set_params(self, thetas, kerns):
-        kerns = [kerns[0], kerns[1]]
-        thetas = [thetas[:self.N_theta1],thetas[self.N_theta1:]]
-        for i in range(2):
+    
+    def set_params_bl(self, thetas, kerns):
+        thetas = [thetas[:self.N_theta1], thetas[self.N_theta1:]]
+        for gidx in range(len(self.param_names_flat)):
+            is_wedge = False
+            for aidx, didx in self.wedge_idx:
+                if gidx == aidx or gidx == didx:
+                    is_wedge = True
+                    break
+            if is_wedge:
+                continue
+            i = 0 if gidx < self.N_theta1 else 1
+            j = gidx if i == 0 else gidx - self.N_theta1
             if any('.' in s for s in self.param_names[i]):
-                for j in range(len(self.param_names[i])):
-                    parts = self.param_names[i][j].split('.')
-                    attr = getattr(kerns[i],parts[0])
+                parts = self.param_names[i][j].split('.')
+                for k in range(self.N_bl):
+                    kerns_k = kerns[k]
+                    attr = getattr(kerns_k[i], parts[0])
                     setattr(attr, parts[1], thetas[i][j])
             else:
-                for j in range(len(self.param_names[i])):
-                    setattr(kerns[i], self.param_names[i][j], thetas[i][j])
+                for k in range(self.N_bl):
+                    kerns_k = kerns[k]
+                    setattr(kerns_k[i], self.param_names[i][j], thetas[i][j])
+        uvec = self.uv_means
+        for aidx, didx in self.wedge_idx:
+            ia = 0 if aidx < self.N_theta1 else 1
+            ja = aidx if ia == 0 else aidx - self.N_theta1
+            idl = 0 if didx < self.N_theta1 else 1
+            jdl = didx if idl == 0 else didx - self.N_theta1
+            name_a = self.param_names[ia][ja]
+            if '.' in name_a:
+                parts_a = name_a.split('.')
+                kern_name = parts_a[0]
+            else:
+                kern_name = None
+            angle = thetas[ia][ja]
+            delay_buffer = thetas[idl][jdl]
+            lengthscale_vec = 1.0 / (delay_buffer + np.sin(angle)*uvec/self.mean_fmhz)
+            for k in range(self.N_bl):
+                kerns_k = kerns[k]
+                if kern_name is None:
+                    attr = kerns_k[ia]
+                else:
+                    attr = getattr(kerns_k[ia], kern_name)
+                attr.lengthscale = lengthscale_vec[k]
         return kerns
-
+                
     def log_likelihood(self, thetas):
-        self.kerns = self.set_params(thetas, self.kerns)
+        self.kerns = self.set_params_bl(thetas, self.kerns)
         return self.lml(self.freqs, self.Y_all)
 
     def log_prior(self, thetas):
@@ -107,32 +161,7 @@ class SharedVisSampler:
             return -np.inf
         return lp + self.log_likelihood(thetas)
 
-    # def run_sampler(self, nwalkers=50, nsteps=200, discard=100, emcee_moves='stretch'):
-    #     if emcee_moves == 'stretch':
-    #         moves = emcee.moves.StretchMove()
-    #     elif emcee_moves == 'kde':
-    #         moves = emcee.moves.KDEMove()
-    #     p0 = [np.array([prior.rvs(1)[0] for prior in self.prior_bounds]) for _ in range(nwalkers)]
-    #     sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior, moves=moves)
-    #     sampler.run_mcmc(p0, nsteps, progress=True)
-    #     self.result =  sampler
-    #     self.plot_samples()
-    #     self.discard = discard
-    #     self.posterior_samples, _ = self.clip_outliers(discard)
-    #     self.update_model_with_posterior_mean()
-    #     self.print_posterior_means()
-    #     self.plot_corner()
-
     def run_sampler(self, nwalkers=50, nsteps=200, discard=100, emcee_moves='kde', ncores=12):
-        """
-        Run MCMC.
-
-        Arguments:
-        nwalkers (int): Number of walkers
-        nsteps (int): Number of MCMC steps
-        discard (int): Number of steps to discard from the end.
-        emcee_moves (str): The moves algorithm to use in EnsembleSampler. Two options: 'stretch' and 'kde'.
-        """
         if emcee_moves == 'stretch':
             moves = emcee.moves.StretchMove()
         elif emcee_moves == 'kde':
@@ -171,7 +200,7 @@ class SharedVisSampler:
         
     def update_model_with_posterior_mean(self):
         mean_vals = np.mean(self.posterior_samples, axis=0)
-        self.kerns = self.set_params(mean_vals, self.kerns)
+        self.kerns = self.set_params_bl(mean_vals, self.kerns)
 
     def print_posterior_means(self):
         mean_vals = np.mean(self.posterior_samples, axis=0)
@@ -198,39 +227,6 @@ class SharedVisSampler:
 
     def plot_corner(self):
         corner.corner(self.posterior_samples, labels=self.param_names_flat, smooth=1)
-
-    def posterior_mean(self, kern_pred, coh=True):
-        N = len(self.freqs)
-        K = self.K_comb(self.freqs, self.kerns)
-        K[:N,:N] += self.noise1_var*np.eye(N)
-        K[N:,N:] += self.noise2_var*np.eye(N)
-        Wi, LW, LWi, W_logdet = pdinv(K)
-        alpha, _ = dpotrs(LW, self.Y_all, lower=1)
-        if coh:
-            K_p = np.zeros_like(K)
-            K_p[:N,:N] = kern_pred.K(self.freqs)
-            K_p[N:,N:] = kern_pred.K(self.freqs)
-            K_p[:N,N:] = kern_pred.K(self.freqs)
-            K_p[N:,:N] = kern_pred.K(self.freqs)
-            y_mean = K_p.T.dot(alpha)[:N,:]
-            y_mean_complex = y_mean[:,:y_mean.shape[1]//2] + 1j*y_mean[:,y_mean.shape[1]//2:]
-            data_pred = self.data1.copy()
-            data_pred.data = y_mean_complex
-            return data_pred
-        else:
-            K_p = np.zeros_like(K)
-            K_p[:N,:N] = kern_pred.K(self.freqs)
-            K_p[N:,N:] = kern_pred.K(self.freqs)
-            y_mean = K_p.T.dot(alpha)
-            y_mean1 = y_mean[:N,:]
-            y_mean2 = y_mean[N:,:]
-            y_mean1_complex = y_mean1[:,:y_mean1.shape[1]//2] + 1j*y_mean1[:,y_mean1.shape[1]//2:]
-            y_mean2_complex = y_mean2[:,:y_mean2.shape[1]//2] + 1j*y_mean2[:,y_mean2.shape[1]//2:]
-            data_pred1 = self.data1.copy()
-            data_pred2 = self.data2.copy()
-            data_pred1.data = y_mean1_complex
-            data_pred2.data = y_mean2_complex
-            return data_pred1, data_pred2
 
     def unpack_name(self, pred_name, kern_full, coh=True):
         if any('.' in s for s in self.param_names[(not coh)*1]):
@@ -267,36 +263,93 @@ class SharedVisSampler:
             cube_comb.data = data
             cube_comb.weights.data = weights
         return cube_comb
-            
+
     def predict_dist(self, pred_name, kern_full, coh=True, n_pick=100, subtract_from=None, combine=False):
         N = len(self.freqs)
-        K = self.K_comb(self.freqs, kern_full)
-        K[:N,:N] += self.noise1_var*np.eye(N)
-        K[N:,N:] += self.noise2_var*np.eye(N)
-        Wi, LW, LWi, W_logdet = pdinv(K)
-        alpha, _ = dpotrs(LW, self.Y_all, lower=1)
-        kern_pred = self.kern_from_name(pred_name, kern_full, coh=coh)
-        if coh==True:
-            K_p = np.zeros_like(K)
-            K_p[:N,:N] = kern_pred.K(self.freqs)
-            K_p[N:,N:] = kern_pred.K(self.freqs)
-            K_p[:N,N:] = kern_pred.K(self.freqs)
-            K_p[N:,:N] = kern_pred.K(self.freqs)
-            y_mean = K_p.T.dot(alpha)[:N,:]
-            v, _ = dpotrs(LW, K_p, lower=1)
-            y_cov = (K_p - K_p.T.dot(v))[:N,:N]
-            if not is_positive_definite(y_cov):
-                y_cov = nearest_postive_definite(y_cov)
-            y_cov_samples = np.transpose(np.random.multivariate_normal(np.zeros(N), y_cov, size=(y_mean.shape[1],n_pick)), axes=(1,2,0))
-            y_mean_gen = list(y_mean[None,:,:]+y_cov_samples)
-            y_mean_complex = [y[:,:y.shape[1]//2] + 1j*y[:,y.shape[1]//2:] for y in y_mean_gen]
-            data_pred = [self.data1.copy() for i in range(n_pick)]
+        if coh == True:
+            data_pred = [self.data1.copy() for _ in range(n_pick)]
             for i in range(n_pick):
-                data_pred[i].data = y_mean_complex[i]
-            if subtract_from is not None:
+                data_pred[i].data = np.zeros_like(self.data1.data)
+        else:
+            data_pred = [(self.data1.copy(), self.data2.copy()) for _ in range(n_pick)]
+            for i in range(n_pick):
+                data_pred[i][0].data = np.zeros_like(self.data1.data)
+                data_pred[i][1].data = np.zeros_like(self.data2.data)
+        for b in range(self.N_bl):
+            kern_full_b = kern_full[b]
+            Yb = self.Y_all[b]
+            idxb = self.idxs[b]
+            K = self.K_comb(self.freqs, kern_full_b)
+            K[:N, :N] += self.noise1_var * np.eye(N)
+            K[N:, N:] += self.noise2_var * np.eye(N)
+            Wi, LW, LWi, W_logdet = pdinv(K)
+            alpha, _ = dpotrs(LW, Yb, lower=1)
+            kern_pred = self.kern_from_name(pred_name, kern_full_b, coh=coh)
+            if coh == True:
+                K_p = np.zeros_like(K)
+                Kp = kern_pred.K(self.freqs)
+                K_p[:N, :N] = Kp
+                K_p[N:, N:] = Kp
+                K_p[:N, N:] = Kp
+                K_p[N:, :N] = Kp
+                y_mean = K_p.T.dot(alpha)[:N, :]
+                v, _ = dpotrs(LW, K_p, lower=1)
+                y_cov = (K_p - K_p.T.dot(v))[:N, :N]
+                if not is_positive_definite(y_cov):
+                    y_cov = nearest_postive_definite(y_cov)
+                y_cov_samples = np.transpose(np.random.multivariate_normal(np.zeros(N), y_cov, size=(y_mean.shape[1], n_pick)),axes=(1, 2, 0))
+                y_mean_gen = list(y_mean[None, :, :] + y_cov_samples)
+                y_mean_complex = [y[:, :y.shape[1] // 2] + 1j * y[:, y.shape[1] // 2 :] for y in y_mean_gen]
+                for i in range(n_pick):
+                    data_pred[i].data[:, idxb] = y_mean_complex[i]
+            elif coh == False:
+                K_p = np.zeros_like(K)
+                Kp = kern_pred.K(self.freqs)
+                K_p[:N, :N] = Kp
+                K_p[N:, N:] = Kp
+                y_mean = K_p.T.dot(alpha)
+                v, _ = dpotrs(LW, K_p, lower=1)
+                y_cov = K_p - K_p.T.dot(v)
+                if not is_positive_definite(y_cov):
+                    y_cov = nearest_postive_definite(y_cov)
+                y_cov_samples = np.transpose(np.random.multivariate_normal(np.zeros(2 * N), y_cov, size=(y_mean.shape[1], n_pick)),axes=(1, 2, 0))
+                y_mean_gen = list(y_mean[None, :, :] + y_cov_samples)
+                y_mean1 = [y[:N, :] for y in y_mean_gen]
+                y_mean2 = [y[N:, :] for y in y_mean_gen]
+                y_mean1_complex = [y[:, :y.shape[1] // 2] + 1j * y[:, y.shape[1] // 2 :] for y in y_mean1]
+                y_mean2_complex = [y[:, :y.shape[1] // 2] + 1j * y[:, y.shape[1] // 2 :] for y in y_mean2]
+                for i in range(n_pick):
+                    data_pred[i][0].data[:, idxb] = y_mean1_complex[i]
+                    data_pred[i][1].data[:, idxb] = y_mean2_complex[i]
+            else:
+                K_p = np.zeros_like(K)
+                Kp0 = kern_pred[0].K(self.freqs)
+                Kp1 = kern_pred[1].K(self.freqs)
+                K_p[:N, :N] = Kp0
+                K_p[N:, N:] = Kp0
+                K_p[:N, N:] = Kp0
+                K_p[N:, :N] = Kp0
+                K_p[:N, :N] += Kp1
+                K_p[N:, N:] += Kp1
+                y_mean = K_p.T.dot(alpha)
+                v, _ = dpotrs(LW, K_p, lower=1)
+                y_cov = K_p - K_p.T.dot(v)
+                if not is_positive_definite(y_cov):
+                    y_cov = nearest_postive_definite(y_cov)
+                y_cov_samples = np.transpose(np.random.multivariate_normal(np.zeros(2 * N), y_cov, size=(y_mean.shape[1], n_pick)),axes=(1, 2, 0))
+                y_mean_gen = list(y_mean[None, :, :] + y_cov_samples)
+                y_mean1 = [y[:N, :] for y in y_mean_gen]
+                y_mean2 = [y[N:, :] for y in y_mean_gen]
+                y_mean1_complex = [y[:, :y.shape[1] // 2] + 1j * y[:, y.shape[1] // 2 :] for y in y_mean1]
+                y_mean2_complex = [y[:, :y.shape[1] // 2] + 1j * y[:, y.shape[1] // 2 :] for y in y_mean2]
+                for i in range(n_pick):
+                    data_pred[i][0].data[:, idxb] = y_mean1_complex[i]
+                    data_pred[i][1].data[:, idxb] = y_mean2_complex[i]
+        if subtract_from is not None:
+            if coh == True:
                 if type(subtract_from) == list:
                     for i in range(n_pick):
-                        data_pred[i] = (data_pred[i].copy(),data_pred[i].copy())
+                        data_pred[i] = (data_pred[i].copy(), data_pred[i].copy())
                         data_pred[i][0].data = subtract_from[0].data - data_pred[i][0].data
                         data_pred[i][1].data = subtract_from[1].data - data_pred[i][1].data
                     if combine == True:
@@ -305,62 +358,16 @@ class SharedVisSampler:
                 else:
                     for i in range(n_pick):
                         data_pred[i].data = subtract_from.data - data_pred[i].data
-        elif coh==False:
-            K_p = np.zeros_like(K)
-            K_p[:N,:N] = kern_pred.K(self.freqs)
-            K_p[N:,N:] = kern_pred.K(self.freqs)
-            y_mean = K_p.T.dot(alpha)
-            v, _ = dpotrs(LW, K_p, lower=1)
-            y_cov = K_p - K_p.T.dot(v)
-            if not is_positive_definite(y_cov):
-                y_cov = nearest_postive_definite(y_cov)
-            y_cov_samples = np.transpose(np.random.multivariate_normal(np.zeros(2*N), y_cov, size=(y_mean.shape[1],n_pick)), axes=(1,2,0))
-            y_mean_gen = list(y_mean[None,:,:]+y_cov_samples)
-            y_mean1 = [y[:N,:] for y in y_mean_gen]
-            y_mean2 = [y[N:,:] for y in y_mean_gen]
-            y_mean1_complex = [y[:,:y.shape[1]//2] + 1j*y[:,y.shape[1]//2:] for y in y_mean1]
-            y_mean2_complex = [y[:,:y.shape[1]//2] + 1j*y[:,y.shape[1]//2:] for y in y_mean2]
-            data_pred = [(self.data1.copy(),self.data2.copy()) for i in range(n_pick)]
-            for i in range(n_pick):
-                data_pred[i][0].data = y_mean1_complex[i]
-                data_pred[i][1].data = y_mean2_complex[i]
-            if subtract_from is not None:
+            else:
                 for i in range(n_pick):
                     data_pred[i][0].data = subtract_from[0].data - data_pred[i][0].data
                     data_pred[i][1].data = subtract_from[1].data - data_pred[i][1].data
-            if combine == True:
-                for i in range(n_pick):
-                    data_pred[i] = self.combine_cubes(data_pred[i][0], data_pred[i][1])
-        else:
-            K_p = np.zeros_like(K)
-            K_p[:N,:N] = kern_pred[0].K(self.freqs)
-            K_p[N:,N:] = kern_pred[0].K(self.freqs)
-            K_p[:N,N:] = kern_pred[0].K(self.freqs)
-            K_p[N:,:N] = kern_pred[0].K(self.freqs)
-            K_p[:N,:N] += kern_pred[1].K(self.freqs)
-            K_p[N:,N:] += kern_pred[1].K(self.freqs)
-            y_mean = K_p.T.dot(alpha)
-            v, _ = dpotrs(LW, K_p, lower=1)
-            y_cov = K_p - K_p.T.dot(v)
-            if not is_positive_definite(y_cov):
-                y_cov = nearest_postive_definite(y_cov)
-            y_cov_samples = np.transpose(np.random.multivariate_normal(np.zeros(2*N), y_cov, size=(y_mean.shape[1],n_pick)), axes=(1,2,0))
-            y_mean_gen = list(y_mean[None,:,:]+y_cov_samples)
-            y_mean1 = [y[:N,:] for y in y_mean_gen]
-            y_mean2 = [y[N:,:] for y in y_mean_gen]
-            y_mean1_complex = [y[:,:y.shape[1]//2] + 1j*y[:,y.shape[1]//2:] for y in y_mean1]
-            y_mean2_complex = [y[:,:y.shape[1]//2] + 1j*y[:,y.shape[1]//2:] for y in y_mean2]
-            data_pred = [(self.data1.copy(),self.data2.copy()) for i in range(n_pick)]
+                if combine == True:
+                    for i in range(n_pick):
+                        data_pred[i] = self.combine_cubes(data_pred[i][0], data_pred[i][1])
+        elif combine == True and coh != True:
             for i in range(n_pick):
-                data_pred[i][0].data = y_mean1_complex[i]
-                data_pred[i][1].data = y_mean2_complex[i]
-            if subtract_from is not None:
-                for i in range(n_pick):
-                    data_pred[i][0].data = subtract_from[0].data - data_pred[i][0].data
-                    data_pred[i][1].data = subtract_from[1].data - data_pred[i][1].data
-            if combine == True:
-                for i in range(n_pick):
-                    data_pred[i] = self.combine_cubes(data_pred[i][0], data_pred[i][1])
+                data_pred[i] = self.combine_cubes(data_pred[i][0], data_pred[i][1])
         return data_pred
 
     def sample_cubes(self, pred_name, coh=True, discard=None, n_pick=100, subtract_from=None, combine=False):
@@ -373,7 +380,7 @@ class SharedVisSampler:
         bar = tqdm(total=n_pick)
         for i in range(n_pick):
             theta = picked_samples[i,:]
-            kerns_theta = self.set_params(theta, self.kerns)
+            kerns_theta = self.set_params_bl(theta, self.kerns)
             cube = self.predict_dist(pred_name, kerns_theta, coh=coh, n_pick=1, subtract_from=subtract_from, combine=combine)[0]
             cubes.append(cube)
             bar.update(1)
