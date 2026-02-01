@@ -33,7 +33,7 @@ class BaselineSampler:
     umax (float): Maximum uv
     uv_bins_du (float): uv bin spacing for which separate kernels are used
     """
-    def __init__(self, data_nights, kerns, noise_nights, param_names, wedge_idx, prior_bounds, umin, umax, uv_bins_du):
+    def __init__(self, data_nights, kerns, noise_nights, param_names, wedge_idx, prior_bounds, umin, umax, uv_bins_du, noise_alpha=None):
         self.data1 = data_nights[0]
         self.data2 = data_nights[1]
         self.freqs = self.data1.freqs.reshape(-1,1)*1e-6
@@ -50,7 +50,11 @@ class BaselineSampler:
         self.param_names_flat = [item for sublist in self.param_names for item in sublist]
         self.wedge_idx = wedge_idx
         self.prior_bounds = prior_bounds
+        self.noise_alpha = noise_alpha
+        self.fit_noise_alpha = (noise_alpha is True)
         self.ndim = len(param_names[0])+len(param_names[1])
+        if self.fit_noise_alpha:
+            self.ndim += 1
         self.N_theta1 = len(param_names[0])
         self.noise1_var = noise_nights[0].data.real.var()
         self.noise2_var = noise_nights[1].data.real.var()
@@ -87,15 +91,20 @@ class BaselineSampler:
             YYT_factor = YYT_factors[i]
             Y = Ys[i]
             Ky = K.copy()
-            Ky[:N,:N] += self.noise1_var*np.eye(N)
-            Ky[N:,N:] += self.noise2_var*np.eye(N)
+            alpha = 1.0 if self.noise_alpha is None else float(self.noise_alpha)
+            Ky[:N,:N] += self.noise1_var*np.eye(N)*alpha
+            Ky[N:,N:] += self.noise2_var*np.eye(N)*alpha
             Wi, LW, LWi, W_logdet = pdinv(Ky)
             alpha, _ = dpotrs(LW, YYT_factor, lower=1)
             log_marginal +=  0.5*(-Y.size * log_2_pi - Y.shape[1] * W_logdet - np.sum(alpha * YYT_factor))
         return log_marginal
     
     def set_params_bl(self, thetas, kerns):
-        thetas = [thetas[:self.N_theta1], thetas[self.N_theta1:]]
+        if self.fit_noise_alpha:
+            self.noise_alpha = thetas[-1]
+            thetas = [thetas[:self.N_theta1], thetas[self.N_theta1:-1]]
+        else:
+            thetas = [thetas[:self.N_theta1], thetas[self.N_theta1:]]
         for gidx in range(len(self.param_names_flat)):
             is_wedge = False
             for aidx, didx in self.wedge_idx:
@@ -212,11 +221,14 @@ class BaselineSampler:
         shape = chain.shape
         ncols=4
         nrows = int(np.ceil((self.ndim + 1) / ncols))
+        param_names_flat = self.param_names_flat.copy()
+        if self.fit_noise_alpha:
+            param_names_flat.append('noise_alpha')
         fig,ax = plt.subplots(nrows=nrows, ncols=ncols, figsize=(12, 1 + 2.2 * nrows), sharex=True)
         for i in range(shape[2]):
-            if 'variance' in self.param_names_flat[i]:
+            if 'variance' in param_names_flat[i]:
                 ax[i//ncols,i%ncols].set_yscale('log')
-            ax[i//ncols,i%ncols].text(0.01, 0.95, self.param_names_flat[i]+'=%.4f'%(np.median(chain[:,:,i])), transform=ax[i//ncols,i%ncols].transAxes, fontsize=9, va='top', ha='left')
+            ax[i//ncols,i%ncols].text(0.01, 0.95, param_names_flat[i]+'=%.4f'%(np.median(chain[:,:,i])), transform=ax[i//ncols,i%ncols].transAxes, fontsize=9, va='top', ha='left')
             for j in range(shape[0]):
                 ax[i//ncols,i%ncols].plot(chain[j,:,i], color='tab:orange', alpha=0.6)
         log_prob = self.result.get_log_prob()
@@ -226,7 +238,10 @@ class BaselineSampler:
     
 
     def plot_corner(self):
-        corner.corner(self.posterior_samples, labels=self.param_names_flat, smooth=1)
+        param_names_flat = self.param_names_flat.copy()
+        if self.noise_alpha is not None:
+            param_names_flat.append('noise_alpha')
+        corner.corner(self.posterior_samples, labels=param_names_flat, smooth=1)
 
     def unpack_name(self, pred_name, kern_full, coh=True):
         if any('.' in s for s in self.param_names[(not coh)*1]):
@@ -280,8 +295,9 @@ class BaselineSampler:
             Yb = self.Y_all[b]
             idxb = self.idxs[b]
             K = self.K_comb(self.freqs, kern_full_b)
-            K[:N, :N] += self.noise1_var * np.eye(N)
-            K[N:, N:] += self.noise2_var * np.eye(N)
+            alpha = 1.0 if self.noise_alpha is None else float(self.noise_alpha)
+            K[:N, :N] += self.noise1_var * np.eye(N) * alpha
+            K[N:, N:] += self.noise2_var * np.eye(N) * alpha
             Wi, LW, LWi, W_logdet = pdinv(K)
             alpha, _ = dpotrs(LW, Yb, lower=1)
             kern_pred = self.kern_from_name(pred_name, kern_full_b, coh=coh)
