@@ -18,7 +18,7 @@ log_2_pi = np.log(2*np.pi)
 from .funcs import *
 
 
-class BaselineSampler:
+class BaselineSamplerBeta:
     """
     Perform GPR with baseline dependent kernels
 
@@ -27,14 +27,13 @@ class BaselineSampler:
     kerns (list): List of two GPy.kern objects, for coherent and incoherent parts.
     noise_nights (list): List of two ps_eor.datacube.CartDataCube objects, corresponding to first and second night noise cubes.
     param_names (list): List of two lists, containing hyperparameter names that are optimized. First list is for coherent part and second for incoherent part.
-    prior_bounds (list): List of priors OR floats (fixed values). Must have length len(param_names_flat) or len(param_names_flat)+1.
-                        If +1, the last element corresponds to noise_alpha (float=fixed, prior=sampled).
-    wedge_idx (list): List of lists. Each sublist contains two indices (in param_names_flat) pointing to the angle and delay_buffer parameters.
+    prior_bounds (list): Single list of GPy.prior objects, one for each hyperparameter that is optimized, in same order as param_names: coherent first, incoherent next.
+    wedge_idx (list): List of lists. Each sublist contains two indices pointing to the angle and delay_buffer parameters that have been included in param_names.
     umin (float): Minimum uv
     umax (float): Maximum uv
     uv_bins_du (float): uv bin spacing for which separate kernels are used
     """
-    def __init__(self, data_nights, kerns, noise_nights, param_names, wedge_idx, prior_bounds, umin, umax, uv_bins_du):
+    def __init__(self, data_nights, kerns, noise_nights, param_names, wedge_idx, prior_bounds, umin, umax, uv_bins_du, noise_alpha=None):
         self.data1 = data_nights[0]
         self.data2 = data_nights[1]
         self.freqs = self.data1.freqs.reshape(-1,1)*1e-6
@@ -50,48 +49,19 @@ class BaselineSampler:
         self.param_names = param_names
         self.param_names_flat = [item for sublist in self.param_names for item in sublist]
         self.wedge_idx = wedge_idx
-
-        self.ndim_kernel = len(self.param_names_flat)
-        if len(prior_bounds) == self.ndim_kernel + 1:
-            self.has_noise_alpha = True
-        elif len(prior_bounds) == self.ndim_kernel:
-            self.has_noise_alpha = False
-        else:
-            raise ValueError("prior_bounds must have length ndim_kernel or ndim_kernel+1 (with noise_alpha).")
-
-        self.param_names_full = self.param_names_flat + (['noise_alpha'] if self.has_noise_alpha else [])
         self.prior_bounds = prior_bounds
-        self.ndim_full = len(self.param_names_full)
-
-        self.fixed_vals = np.array([np.nan]*self.ndim_full, dtype=float)
-        self.free_mask = np.ones(self.ndim_full, dtype=bool)
-        for i, pb in enumerate(self.prior_bounds):
-            if isinstance(pb, (int, float, np.floating)):
-                self.fixed_vals[i] = float(pb)
-                self.free_mask[i] = False
-        self.free_idx = np.where(self.free_mask)[0]
-        self.fixed_idx = np.where(~self.free_mask)[0]
-        self.param_names_free = [self.param_names_full[i] for i in self.free_idx]
-
-        self.ndim = len(self.free_idx)
+        self.noise_alpha = noise_alpha
+        self.fit_noise_alpha = (noise_alpha is True)
+        self.ndim = len(param_names[0])+len(param_names[1])
+        if self.fit_noise_alpha:
+            self.ndim += 1
         self.N_theta1 = len(param_names[0])
         self.noise1_var = noise_nights[0].data.real.var()
         self.noise2_var = noise_nights[1].data.real.var()
         self.result = None
         self.discard = None
         self.posterior_samples = None
-        self.noise_alpha = None
         
-    def inflate_thetas(self, thetas_free):
-        thetas_free = np.asarray(thetas_free, dtype=float)
-        if thetas_free.size != len(self.free_idx):
-            raise ValueError(f"Expected {len(self.free_idx)} free params, got {thetas_free.size}")
-        full = np.zeros(self.ndim_full, dtype=float)
-        full[self.free_idx] = thetas_free
-        if self.fixed_idx.size > 0:
-            full[self.fixed_idx] = self.fixed_vals[self.fixed_idx]
-        return full
-
     def K_comb(self, X, kern):
         N = len(X)
         kern1, kern2 = kern
@@ -109,7 +79,7 @@ class BaselineSampler:
     def K_bl(self, X, kerns):
         K_bl = [self.K_comb(X, kern) for kern in kerns]
         return K_bl
-
+    
     def lml(self, X, Ys):
         N = len(X)
         m = 0
@@ -125,11 +95,16 @@ class BaselineSampler:
             Ky[:N,:N] += self.noise1_var*np.eye(N)*alpha
             Ky[N:,N:] += self.noise2_var*np.eye(N)*alpha
             Wi, LW, LWi, W_logdet = pdinv(Ky)
-            alpha_sol, _ = dpotrs(LW, YYT_factor, lower=1)
-            log_marginal += 0.5*(-Y.size * log_2_pi - Y.shape[1] * W_logdet - np.sum(alpha_sol * YYT_factor))
+            alpha, _ = dpotrs(LW, YYT_factor, lower=1)
+            log_marginal +=  0.5*(-Y.size * log_2_pi - Y.shape[1] * W_logdet - np.sum(alpha * YYT_factor))
         return log_marginal
-
+    
     def set_params_bl(self, thetas, kerns):
+        if self.fit_noise_alpha:
+            self.noise_alpha = thetas[-1]
+            thetas = [thetas[:self.N_theta1], thetas[self.N_theta1:-1]]
+        else:
+            thetas = [thetas[:self.N_theta1], thetas[self.N_theta1:]]
         for gidx in range(len(self.param_names_flat)):
             is_wedge = False
             for aidx, didx in self.wedge_idx:
@@ -138,57 +113,49 @@ class BaselineSampler:
                     break
             if is_wedge:
                 continue
-
             i = 0 if gidx < self.N_theta1 else 1
             j = gidx if i == 0 else gidx - self.N_theta1
-            val = thetas[gidx]
-            name = self.param_names[i][j]
-
-            if '.' in name:
-                parts = name.split('.')
+            if any('.' in s for s in self.param_names[i]):
+                parts = self.param_names[i][j].split('.')
                 for k in range(self.N_bl):
                     kerns_k = kerns[k]
                     attr = getattr(kerns_k[i], parts[0])
-                    setattr(attr, parts[1], val)
+                    setattr(attr, parts[1], thetas[i][j])
             else:
                 for k in range(self.N_bl):
                     kerns_k = kerns[k]
-                    setattr(kerns_k[i], name, val)
-
+                    setattr(kerns_k[i], self.param_names[i][j], thetas[i][j])
         uvec = self.uv_means
         for aidx, didx in self.wedge_idx:
             ia = 0 if aidx < self.N_theta1 else 1
             ja = aidx if ia == 0 else aidx - self.N_theta1
-
+            idl = 0 if didx < self.N_theta1 else 1
+            jdl = didx if idl == 0 else didx - self.N_theta1
             name_a = self.param_names[ia][ja]
             if '.' in name_a:
-                kern_name = name_a.split('.')[0]
+                parts_a = name_a.split('.')
+                kern_name = parts_a[0]
             else:
                 kern_name = None
-
-            angle = thetas[aidx]
-            delay_buffer = thetas[didx]
+            angle = thetas[ia][ja]
+            delay_buffer = thetas[idl][jdl]
             lengthscale_vec = 1.0 / (delay_buffer + np.sin(angle)*uvec/self.mean_fmhz)
             for k in range(self.N_bl):
                 kerns_k = kerns[k]
-                attr = kerns_k[ia] if kern_name is None else getattr(kerns_k[ia], kern_name)
+                if kern_name is None:
+                    attr = kerns_k[ia]
+                else:
+                    attr = getattr(kerns_k[ia], kern_name)
                 attr.lengthscale = lengthscale_vec[k]
-
         return kerns
-
+                
     def log_likelihood(self, thetas):
-        thetas_full = self.inflate_thetas(thetas)
-        if self.has_noise_alpha:
-            self.noise_alpha = float(thetas_full[-1])
-        self.kerns = self.set_params_bl(thetas_full[:self.ndim_kernel], self.kerns)
+        self.kerns = self.set_params_bl(thetas, self.kerns)
         return self.lml(self.freqs, self.Y_all)
 
     def log_prior(self, thetas):
-        thetas_full = self.inflate_thetas(thetas)
         logp = 0.0
-        for i, (val, prior) in enumerate(zip(thetas_full, self.prior_bounds)):
-            if not self.free_mask[i]:
-                continue
+        for val, prior in zip(thetas, self.prior_bounds):
             if prior is None:
                 continue
             lp = prior.lnpdf(val)
@@ -208,27 +175,13 @@ class BaselineSampler:
             moves = emcee.moves.StretchMove()
         elif emcee_moves == 'kde':
             moves = emcee.moves.KDEMove()
-        else:
-            raise ValueError("emcee_moves must be 'stretch' or 'kde'")
-
-        def draw_start():
-            vals = []
-            for idx in self.free_idx:
-                prior = self.prior_bounds[idx]
-                if prior is None:
-                    raise ValueError(f"No prior provided for free parameter {self.param_names_full[idx]}")
-                vals.append(prior.rvs(1)[0])
-            return np.array(vals, dtype=float)
-
-        p0 = [draw_start() for _ in range(nwalkers)]
-
+        p0 = [np.array([prior.rvs(1)[0] for prior in self.prior_bounds]) for _ in range(nwalkers)]
         if ncores == 'max':
             ncores = mp.cpu_count()
         warnings.filterwarnings("ignore", message="divide by zero encountered in log", category=RuntimeWarning)
         with mp.get_context("fork").Pool(processes=ncores) as pool:
             sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior, moves=moves, pool=pool)
             sampler.run_mcmc(p0, nsteps, progress=True)
-
         self.result = sampler
         self.plot_samples()
         self.discard = discard
@@ -244,7 +197,7 @@ class BaselineSampler:
         mask = max_log_prob > np.median(max_log_prob) - discard_walkers_nsigma * np.median(log_prob.std(axis=0))
         if (~mask).sum() > 0:
             print(f'Discarding {(~mask).sum()} walkers')
-        samples = samples[:, mask, :].reshape(-1, samples.shape[-1])
+        samples = samples[:, mask, :].reshape(-1, samples.shape[-1])        
         log_prob = log_prob[:, mask].flatten()
         samples_outliers = np.zeros_like(samples)
         for i in range(samples.shape[1]):
@@ -253,42 +206,42 @@ class BaselineSampler:
             samples_outliers[abs(samples[:, i] - m) > clip_nsigma * s, i] = 1
         mask = (samples_outliers.sum(axis=1) == 0)
         return samples[mask], log_prob[mask]
-
+        
     def update_model_with_posterior_mean(self):
-        mean_free = np.mean(self.posterior_samples, axis=0)
-        thetas_full = self.inflate_thetas(mean_free)
-        if self.has_noise_alpha:
-            self.noise_alpha = float(thetas_full[-1])
-        self.kerns = self.set_params_bl(thetas_full[:self.ndim_kernel], self.kerns)
+        mean_vals = np.mean(self.posterior_samples, axis=0)
+        self.kerns = self.set_params_bl(mean_vals, self.kerns)
 
     def print_posterior_means(self):
-        mean_free = np.mean(self.posterior_samples, axis=0)
-        thetas_full = self.inflate_thetas(mean_free)
-        for i, name in enumerate(self.param_names_full):
-            tag = " (fixed)" if not self.free_mask[i] else ""
-            print(f"Posterior mean {name}{tag}: {thetas_full[i]}")
+        mean_vals = np.mean(self.posterior_samples, axis=0)
+        for name, val in zip(self.param_names_flat, mean_vals):
+            print(f"Posterior mean {name}: {val}")
 
     def plot_samples(self):
         chain = self.result.chain
         shape = chain.shape
-        ncols = 4
+        ncols=4
         nrows = int(np.ceil((self.ndim + 1) / ncols))
-        labels = self.param_names_free.copy()
+        param_names_flat = self.param_names_flat.copy()
+        if self.fit_noise_alpha:
+            param_names_flat.append('noise_alpha')
         fig,ax = plt.subplots(nrows=nrows, ncols=ncols, figsize=(12, 1 + 2.2 * nrows), sharex=True)
         for i in range(shape[2]):
-            if 'variance' in labels[i]:
+            if 'variance' in param_names_flat[i]:
                 ax[i//ncols,i%ncols].set_yscale('log')
-            ax[i//ncols,i%ncols].text(0.01, 0.95, labels[i]+'=%.4f'%(np.median(chain[:,:,i])), transform=ax[i//ncols,i%ncols].transAxes, fontsize=9, va='top', ha='left')
+            ax[i//ncols,i%ncols].text(0.01, 0.95, param_names_flat[i]+'=%.4f'%(np.median(chain[:,:,i])), transform=ax[i//ncols,i%ncols].transAxes, fontsize=9, va='top', ha='left')
             for j in range(shape[0]):
                 ax[i//ncols,i%ncols].plot(chain[j,:,i], color='tab:orange', alpha=0.6)
         log_prob = self.result.get_log_prob()
         for j in range(shape[0]):
             ax[self.ndim//ncols, self.ndim%ncols].plot(log_prob[:,j], color='tab:orange', alpha=0.6)
         ax[self.ndim//ncols, self.ndim%ncols].text(0.01, 0.95, 'likelihood=%.4f'%(np.median(log_prob)), transform=ax[self.ndim//ncols, self.ndim%ncols].transAxes, fontsize=9, va='top', ha='left')
+    
 
     def plot_corner(self):
-        labels = self.param_names_free.copy()
-        corner.corner(self.posterior_samples, labels=labels, smooth=1)
+        param_names_flat = self.param_names_flat.copy()
+        if self.noise_alpha is not None:
+            param_names_flat.append('noise_alpha')
+        corner.corner(self.posterior_samples, labels=param_names_flat, smooth=1)
 
     def unpack_name(self, pred_name, kern_full, coh=True):
         if any('.' in s for s in self.param_names[(not coh)*1]):
@@ -313,7 +266,7 @@ class BaselineSampler:
             kern_pred_inc = self.unpack_name(pred_inc, kern_full, coh=False)
             kern_pred = (kern_pred_coh, kern_pred_inc)
         return kern_pred
-
+    
     def combine_cubes(self, cube1, cube2):
         if cube1.weights == None or cube2.weights == None:
             cube_comb = cube1.copy()
@@ -342,9 +295,9 @@ class BaselineSampler:
             Yb = self.Y_all[b]
             idxb = self.idxs[b]
             K = self.K_comb(self.freqs, kern_full_b)
-            alpha_noise = 1.0 if self.noise_alpha is None else float(self.noise_alpha)
-            K[:N, :N] += self.noise1_var * np.eye(N) * alpha_noise
-            K[N:, N:] += self.noise2_var * np.eye(N) * alpha_noise
+            alpha = 1.0 if self.noise_alpha is None else float(self.noise_alpha)
+            K[:N, :N] += self.noise1_var * np.eye(N) * alpha
+            K[N:, N:] += self.noise2_var * np.eye(N) * alpha
             Wi, LW, LWi, W_logdet = pdinv(K)
             alpha, _ = dpotrs(LW, Yb, lower=1)
             kern_pred = self.kern_from_name(pred_name, kern_full_b, coh=coh)
@@ -435,23 +388,20 @@ class BaselineSampler:
 
     def sample_cubes(self, pred_name, coh=True, discard=None, n_pick=100, subtract_from=None, combine=False):
         if discard is None:
-            discard = self.discard
+            discard=self.discard
         flat_samples, _ = self.clip_outliers(discard)
         idx = np.random.choice(flat_samples.shape[0], size=n_pick, replace=False)
         picked_samples = flat_samples[idx]
         cubes = []
         bar = tqdm(total=n_pick)
         for i in range(n_pick):
-            theta_free = picked_samples[i,:]
-            thetas_full = self.inflate_thetas(theta_free)
-            if self.has_noise_alpha:
-                self.noise_alpha = float(thetas_full[-1])
-            kerns_theta = self.set_params_bl(thetas_full[:self.ndim_kernel], self.kerns)
+            theta = picked_samples[i,:]
+            kerns_theta = self.set_params_bl(theta, self.kerns)
             cube = self.predict_dist(pred_name, kerns_theta, coh=coh, n_pick=1, subtract_from=subtract_from, combine=combine)[0]
             cubes.append(cube)
             bar.update(1)
         return cubes
-
+    
     def get_ps3d(self, ps_gen, kbins, pred_name, coh=True, kind='hyp', discard=None, n_pick=100, subtract_from=None, combine=False):
         """
         Estimate spherical PS for components and optionally subtract from data.
@@ -469,7 +419,7 @@ class BaselineSampler:
         combine (bool): If True, ps for average cubes for two nights is returned.
         """
         if discard is None:
-            discard = self.discard
+            discard=self.discard
         if kind == 'dist':
             print('Sampling from GP posterior')
             cubes = self.predict_dist(pred_name, self.kerns, coh=coh, n_pick=n_pick, subtract_from=subtract_from, combine=combine)
@@ -492,7 +442,7 @@ class BaselineSampler:
             ps1 = pspec.SphericalPowerSpectraMC(ps1)
             ps2 = pspec.SphericalPowerSpectraMC(ps2)
             return ps1, ps2
-
+    
     def get_ps2d(self, ps_gen, pred_name, coh=True, kind='hyp', discard=None, n_pick=100, subtract_from=None, combine=False):
         """
         Estimate cylindrical PS for components and optionally subtract from data.
@@ -509,7 +459,7 @@ class BaselineSampler:
         combine (bool): If True, ps for average cubes for two nights is returned.
         """
         if discard is None:
-            discard = self.discard
+            discard=self.discard
         if kind == 'dist':
             print('Sampling from GP posterior')
             cubes = self.predict_dist(pred_name, self.kerns, coh=coh, n_pick=n_pick, subtract_from=subtract_from, combine=combine)
