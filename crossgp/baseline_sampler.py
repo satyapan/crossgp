@@ -26,15 +26,14 @@ class BaselineSampler:
     data_nights (list): List of two ps_eor.datacube.CartDataCube objects, corresponding to first and second night data cubes.
     kerns (list): List of two GPy.kern objects, for coherent and incoherent parts.
     noise_nights (list): List of two ps_eor.datacube.CartDataCube objects, corresponding to first and second night noise cubes.
-    param_names (list): List of two lists, containing hyperparameter names that are optimized. First list is for coherent part and second for incoherent part.
+    param_names (list): List of two lists, containing hyperparameter names that are optimized. First list is for coherent part and second for incoherent part. If you want wedge parametrization for 'name.lengthscale', replace it by the pair 'name.angle', 'name.delay_buffer'
     prior_bounds (list): List of priors OR floats (fixed values). Must have length len(param_names_flat) or len(param_names_flat)+1.
                         If +1, the last element corresponds to noise_alpha (float=fixed, prior=sampled).
-    wedge_idx (list): List of lists. Each sublist contains two indices (in param_names_flat) pointing to the angle and delay_buffer parameters.
     umin (float): Minimum uv
     umax (float): Maximum uv
     uv_bins_du (float): uv bin spacing for which separate kernels are used
     """
-    def __init__(self, data_nights, kerns, noise_nights, param_names, wedge_idx, prior_bounds, umin, umax, uv_bins_du):
+    def __init__(self, data_nights, kerns, noise_nights, param_names, prior_bounds, umin, umax, uv_bins_du):
         self.data1 = data_nights[0]
         self.data2 = data_nights[1]
         self.freqs = self.data1.freqs.reshape(-1,1)*1e-6
@@ -49,7 +48,7 @@ class BaselineSampler:
         self.kerns = [[kerns[0].copy(),kerns[1].copy()] for i in range(self.N_bl)]
         self.param_names = param_names
         self.param_names_flat = [item for sublist in self.param_names for item in sublist]
-        self.wedge_idx = wedge_idx
+        self.wedge_idx = self.compute_wedge_idx()
 
         self.ndim_kernel = len(self.param_names_flat)
         if len(prior_bounds) == self.ndim_kernel + 1:
@@ -81,6 +80,25 @@ class BaselineSampler:
         self.discard = None
         self.posterior_samples = None
         self.noise_alpha = None
+
+    def compute_wedge_idx(self):
+        flat = [p for sub in self.param_names for p in sub]
+        def key_and_suffix(name):
+            parts = name.rsplit('.', 1)
+            if len(parts) == 2:
+                return parts[0], parts[1]
+            return "", parts[0]
+        angle_idx = {}
+        dbuf_idx = {}
+        for i, p in enumerate(flat):
+            g, suf = key_and_suffix(p)
+            if suf == "angle":
+                angle_idx[g] = i
+            elif suf == "delay_buffer":
+                dbuf_idx[g] = i
+        wedge_idx = [[angle_idx[g], dbuf_idx[g]] for g in angle_idx.keys() & dbuf_idx.keys()]
+        wedge_idx.sort(key=lambda x: x[0])
+        return wedge_idx
         
     def inflate_thetas(self, thetas_free):
         thetas_free = np.asarray(thetas_free, dtype=float)
