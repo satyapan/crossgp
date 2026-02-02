@@ -221,7 +221,7 @@ class BaselineSampler:
             return -np.inf
         return lp + self.log_likelihood(thetas)
 
-    def run_sampler(self, nwalkers=50, nsteps=200, discard=100, emcee_moves='kde', ncores=12):
+    def run_sampler(self, nwalkers=50, nsteps=200, discard=100, emcee_moves='kde', ncores=1):
         if emcee_moves == 'stretch':
             moves = emcee.moves.StretchMove()
         elif emcee_moves == 'kde':
@@ -240,12 +240,16 @@ class BaselineSampler:
 
         p0 = [draw_start() for _ in range(nwalkers)]
 
-        if ncores == 'max':
-            ncores = mp.cpu_count()
         warnings.filterwarnings("ignore", message="divide by zero encountered in log", category=RuntimeWarning)
-        with mp.get_context("fork").Pool(processes=ncores) as pool:
-            sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior, moves=moves, pool=pool)
+        if ncores == 1:
+            sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior, moves=moves)
             sampler.run_mcmc(p0, nsteps, progress=True)
+        else:
+            if ncores == 'max':
+                ncores = mp.cpu_count()
+            with mp.get_context("fork").Pool(processes=ncores) as pool:
+                sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior, moves=moves, pool=pool)
+                sampler.run_mcmc(p0, nsteps, progress=True)
 
         self.result = sampler
         self.plot_samples()
