@@ -123,7 +123,7 @@ class SharedVisSampler:
     #     self.print_posterior_means()
     #     self.plot_corner()
 
-    def run_sampler(self, nwalkers=50, nsteps=200, discard=100, emcee_moves='kde', ncores=12):
+    def run_sampler(self, nwalkers=50, nsteps=200, discard=100, emcee_moves='kde', ncores=1):
         """
         Run MCMC.
 
@@ -138,12 +138,18 @@ class SharedVisSampler:
         elif emcee_moves == 'kde':
             moves = emcee.moves.KDEMove()
         p0 = [np.array([prior.rvs(1)[0] for prior in self.prior_bounds]) for _ in range(nwalkers)]
-        if ncores == 'max':
-            ncores = mp.cpu_count()
+
         warnings.filterwarnings("ignore", message="divide by zero encountered in log", category=RuntimeWarning)
-        with mp.get_context("fork").Pool(processes=ncores) as pool:
-            sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior, moves=moves, pool=pool)
+        if ncores == 1:
+            sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior, moves=moves)
             sampler.run_mcmc(p0, nsteps, progress=True)
+        else:
+            if ncores == 'max':
+                ncores = mp.cpu_count()
+            with mp.get_context("fork").Pool(processes=ncores) as pool:
+                sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior, moves=moves, pool=pool)
+                sampler.run_mcmc(p0, nsteps, progress=True)
+
         self.result = sampler
         self.plot_samples()
         self.discard = discard
