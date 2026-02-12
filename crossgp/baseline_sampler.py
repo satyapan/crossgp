@@ -37,7 +37,7 @@ class BaselineSampler:
     umax (float): Maximum uv
     uv_bins_du (float): uv bin spacing for which separate kernels are used
     """
-    def __init__(self, data_nights, kerns, noise_nights, param_names, prior_bounds, umin, umax, uv_bins_du, k_eor=None):
+    def __init__(self, data_nights, kerns, noise_nights, param_names, prior_bounds, umin, umax, uv_bins_du, k_eor=None, bl_noise=True):
         self.data1 = data_nights[0]
         self.data2 = data_nights[1]
         self.freqs = self.data1.freqs.reshape(-1,1)*1e-6
@@ -83,8 +83,13 @@ class BaselineSampler:
 
         self.ndim = len(self.free_idx)
         self.N_theta1 = len(param_names[0])
-        self.noise1_var = noise_nights[0].data.real.var()
-        self.noise2_var = noise_nights[1].data.real.var()
+        self.bl_noise = bl_noise
+        if self.bl_noise:
+            self.noise1_var = [noise_nights[0].data[:, self.idxs[i]].real.var() for i in range(self.N_bl)]
+            self.noise2_var = [noise_nights[1].data[:, self.idxs[i]].real.var() for i in range(self.N_bl)]
+        else:
+            self.noise1_var = noise_nights[0].data.real.var()
+            self.noise2_var = noise_nights[1].data.real.var()
         self.result = None
         self.discard = None
         self.posterior_samples = None
@@ -158,8 +163,10 @@ class BaselineSampler:
             Y = Ys[i]
             Ky = K.copy()
             alpha = 1.0 if self.noise_alpha is None else float(self.noise_alpha)
-            Ky[:N,:N] += self.noise1_var*np.eye(N)*alpha
-            Ky[N:,N:] += self.noise2_var*np.eye(N)*alpha
+            n1 = self.noise1_var[i] if self.bl_noise else self.noise1_var
+            n2 = self.noise2_var[i] if self.bl_noise else self.noise2_var
+            Ky[:N,:N] += n1 * np.eye(N) * alpha
+            Ky[N:,N:] += n2 * np.eye(N) * alpha
             Wi, LW, LWi, W_logdet = pdinv(Ky)
             alpha_sol, _ = dpotrs(LW, YYT_factor, lower=1)
             log_marginal += 0.5*(-Y.size * log_2_pi - Y.shape[1] * W_logdet - np.sum(alpha_sol * YYT_factor))
@@ -420,8 +427,10 @@ class BaselineSampler:
                 K[:N, N:] += Ke
                 K[N:, :N] += Ke
             alpha_noise = 1.0 if self.noise_alpha is None else float(self.noise_alpha)
-            K[:N, :N] += self.noise1_var * np.eye(N) * alpha_noise
-            K[N:, N:] += self.noise2_var * np.eye(N) * alpha_noise
+            n1 = self.noise1_var[b] if self.bl_noise else self.noise1_var
+            n2 = self.noise2_var[b] if self.bl_noise else self.noise2_var
+            K[:N, :N] += n1 * np.eye(N) * alpha_noise
+            K[N:, N:] += n2 * np.eye(N) * alpha_noise
             Wi, LW, LWi, W_logdet = pdinv(K)
             alpha, _ = dpotrs(LW, Yb, lower=1)
             kern_pred = self.kern_from_name(pred_name, kern_full_b, coh=coh)
