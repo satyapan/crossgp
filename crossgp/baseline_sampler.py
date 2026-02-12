@@ -50,8 +50,8 @@ class BaselineSampler:
         data_stack_bl = [data_stack[:,self.idxs[i]] for i in range(self.N_bl)]
         self.Y_all = [np.hstack((i.real, i.imag)) for i in data_stack_bl]
         self.kerns = [[kerns[0].copy(),kerns[1].copy()] for i in range(self.N_bl)]
-        if k_eor is not None:
-            self.k_eor = k_eor.copy()
+        self.k_eor = None if k_eor is None else k_eor.copy()
+        if self.k_eor is not None:
             self.k_eor.uv_bins = self.uv_bins
             self.k_eor.set_mean_fmhz(self.freqs.mean())
             # self.k_eor.uv_ps_fct = None
