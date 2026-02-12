@@ -36,6 +36,8 @@ class BaselineSampler:
     umin (float): Minimum uv
     umax (float): Maximum uv
     uv_bins_du (float): uv bin spacing for which separate kernels are used
+    k_eor (ml_gpr.VAEKernTorch): The VAE kernel used to generate the EoR covariance.
+    bl_noise (bool): Use different noise variances for the different baseline groups.
     """
     def __init__(self, data_nights, kerns, noise_nights, param_names, prior_bounds, umin, umax, uv_bins_du, k_eor=None, bl_noise=True):
         self.data1 = data_nights[0]
