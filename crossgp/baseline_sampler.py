@@ -17,6 +17,10 @@ log_2_pi = np.log(2*np.pi)
 
 from .funcs import *
 
+class ZeroKern:
+    def K(self, X):
+        N = len(X)
+        return np.zeros((N, N), dtype=float)
 
 class BaselineSampler:
     """
@@ -33,7 +37,7 @@ class BaselineSampler:
     umax (float): Maximum uv
     uv_bins_du (float): uv bin spacing for which separate kernels are used
     """
-    def __init__(self, data_nights, kerns, noise_nights, param_names, prior_bounds, umin, umax, uv_bins_du):
+    def __init__(self, data_nights, kerns, noise_nights, param_names, prior_bounds, umin, umax, uv_bins_du, k_eor=None):
         self.data1 = data_nights[0]
         self.data2 = data_nights[1]
         self.freqs = self.data1.freqs.reshape(-1,1)*1e-6
@@ -46,6 +50,11 @@ class BaselineSampler:
         data_stack_bl = [data_stack[:,self.idxs[i]] for i in range(self.N_bl)]
         self.Y_all = [np.hstack((i.real, i.imag)) for i in data_stack_bl]
         self.kerns = [[kerns[0].copy(),kerns[1].copy()] for i in range(self.N_bl)]
+        if k_eor is not None:
+            self.k_eor = k_eor.copy()
+            self.k_eor.uv_bins = self.uv_bins
+            self.k_eor.set_mean_fmhz(self.freqs.mean())
+            # self.k_eor.uv_ps_fct = None
         self.param_names = param_names
         self.param_names_flat = [item for sublist in self.param_names for item in sublist]
         self.wedge_idx = self.compute_wedge_idx()
@@ -126,6 +135,15 @@ class BaselineSampler:
 
     def K_bl(self, X, kerns):
         K_bl = [self.K_comb(X, kern) for kern in kerns]
+        if self.k_eor is not None:
+            K_eor = self.k_eor.K(X)
+            N = len(X)
+            for i in range(self.N_bl):
+                Ke = K_eor[i]
+                K_bl[i][:N, :N] += Ke
+                K_bl[i][N:, N:] += Ke
+                K_bl[i][:N, N:] += Ke
+                K_bl[i][N:, :N] += Ke
         return K_bl
 
     def lml(self, X, Ys):
@@ -161,6 +179,14 @@ class BaselineSampler:
             j = gidx if i == 0 else gidx - self.N_theta1
             val = thetas[gidx]
             name = self.param_names[i][j]
+
+            val = thetas[gidx]
+            if self.k_eor is not None:
+                eor_name = self.k_eor.name
+                if name.startswith(eor_name):
+                    parts = name.split('.')
+                    setattr(self.k_eor, parts[1], val)
+                    continue
 
             if '.' in name:
                 parts = name.split('.')
@@ -241,13 +267,13 @@ class BaselineSampler:
         p0 = [draw_start() for _ in range(nwalkers)]
 
         warnings.filterwarnings("ignore", message="divide by zero encountered in log", category=RuntimeWarning)
+        if ncores == 'max':
+            ncores = mp.cpu_count()
         if ncores == 1:
             sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior, moves=moves)
             sampler.run_mcmc(p0, nsteps, progress=True)
         else:
-            if ncores == 'max':
-                ncores = mp.cpu_count()
-            with mp.get_context("fork").Pool(processes=ncores) as pool:
+            with mp.Pool(processes=ncores) as pool:
                 sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior, moves=moves, pool=pool)
                 sampler.run_mcmc(p0, nsteps, progress=True)
 
@@ -315,12 +341,19 @@ class BaselineSampler:
     def unpack_name(self, pred_name, kern_full, coh=True):
         if any('.' in s for s in self.param_names[(not coh)*1]):
             if type(pred_name) == str:
-                kern_pred = getattr(kern_full[(not coh)*1], pred_name)
+                if self.k_eor == None or pred_name != self.k_eor.name:
+                    kern_pred = getattr(kern_full[(not coh)*1], pred_name)
+                else:
+                    kern_pred = ZeroKern()
             else:
                 pred_list = []
                 for pred in pred_name:
-                    pred_list.append(getattr(kern_full[(not coh)*1], pred))
-                kern_pred = GPy.kern.Add(pred_list)
+                    if self.k_eor == None or pred != self.k_eor.name:
+                        pred_list.append(getattr(kern_full[(not coh)*1], pred))
+                if len(pred_list) != 0:
+                    kern_pred = GPy.kern.Add(pred_list)
+                else:
+                    kern_pred = ZeroKern()
         else:
             kern_pred = kern_full[(not coh)*1]
         return kern_pred
@@ -335,6 +368,20 @@ class BaselineSampler:
             kern_pred_inc = self.unpack_name(pred_inc, kern_full, coh=False)
             kern_pred = (kern_pred_coh, kern_pred_inc)
         return kern_pred
+
+    def check_kern_name(self, pred_name, kern_name):
+        if isinstance(pred_name, str):
+            return kern_name in pred_name
+        if isinstance(pred_name, list):
+            for item in pred_name:
+                if isinstance(item, list):
+                    for sub in item:
+                        if kern_name in sub:
+                            return True
+                else:
+                    if kern_name in item:
+                        return True
+        return False
 
     def combine_cubes(self, cube1, cube2):
         if cube1.weights == None or cube2.weights == None:
@@ -359,11 +406,19 @@ class BaselineSampler:
             for i in range(n_pick):
                 data_pred[i][0].data = np.zeros_like(self.data1.data)
                 data_pred[i][1].data = np.zeros_like(self.data2.data)
+        if self.k_eor is not None:
+            K_eor = self.k_eor.K(self.freqs)
         for b in range(self.N_bl):
             kern_full_b = kern_full[b]
             Yb = self.Y_all[b]
             idxb = self.idxs[b]
             K = self.K_comb(self.freqs, kern_full_b)
+            if self.k_eor is not None:
+                Ke = K_eor[b]
+                K[:N, :N] += Ke
+                K[N:, N:] += Ke
+                K[:N, N:] += Ke
+                K[N:, :N] += Ke
             alpha_noise = 1.0 if self.noise_alpha is None else float(self.noise_alpha)
             K[:N, :N] += self.noise1_var * np.eye(N) * alpha_noise
             K[N:, N:] += self.noise2_var * np.eye(N) * alpha_noise
@@ -377,6 +432,12 @@ class BaselineSampler:
                 K_p[N:, N:] = Kp
                 K_p[:N, N:] = Kp
                 K_p[N:, :N] = Kp
+                if self.k_eor is not None and self.check_kern_name(pred_name, self.k_eor.name):
+                    Ke = K_eor[b]
+                    K_p[:N, :N] += Ke
+                    K_p[N:, N:] += Ke
+                    K_p[:N, N:] += Ke
+                    K_p[N:, :N] += Ke
                 y_mean = K_p.T.dot(alpha)[:N, :]
                 v, _ = dpotrs(LW, K_p, lower=1)
                 y_cov = (K_p - K_p.T.dot(v))[:N, :N]
@@ -416,6 +477,12 @@ class BaselineSampler:
                 K_p[N:, :N] = Kp0
                 K_p[:N, :N] += Kp1
                 K_p[N:, N:] += Kp1
+                if self.k_eor is not None and self.check_kern_name(pred_name, self.k_eor.name):
+                    Ke = K_eor[b]
+                    K_p[:N, :N] += Ke
+                    K_p[N:, N:] += Ke
+                    K_p[:N, N:] += Ke
+                    K_p[N:, :N] += Ke
                 y_mean = K_p.T.dot(alpha)
                 v, _ = dpotrs(LW, K_p, lower=1)
                 y_cov = K_p - K_p.T.dot(v)
