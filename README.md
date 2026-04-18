@@ -1,7 +1,7 @@
 # CrossGP: Coherent and incoherent component separation with Gaussian Processes
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.16084622.svg)](https://doi.org/10.5281/zenodo.16084622)
 
-crossgp is a Python-based tool for performing Gaussian process regression (GPR) to separate out coherent and incoherent components across multiple data sets. The tool works with general 1D signals as well as gridded visibility cubes in the form obtained using [ps_eor](https://gitlab.com/flomertens/ps_eor). The algorithm used by the tool is described by Munshi et al. (in prep).
+crossgp is a Python-based tool for performing Gaussian process regression (GPR) to separate out coherent and incoherent components across multiple data sets. The tool works with general 1D signals as well as gridded visibility cubes in the form obtained using [ps_eor](https://gitlab.com/flomertens/ps_eor). The algorithm used by the tool is described in [Munshi et al. 2025](https://doi.org/10.1051/0004-6361/202556785).
 
 # Dependencies
 crossgp requires the following python libraries:
