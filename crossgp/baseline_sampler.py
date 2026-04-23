@@ -201,8 +201,10 @@ class BaselineSampler:
                 parts = name.split('.')
                 for k in range(self.N_bl):
                     kerns_k = kerns[k]
-                    attr = getattr(kerns_k[i], parts[0])
-                    setattr(attr, parts[1], val)
+                    obj = kerns_k[i]
+                    for part in parts[:-1]:
+                        obj = getattr(obj, part)
+                    setattr(obj, parts[-1], val)
             else:
                 for k in range(self.N_bl):
                     kerns_k = kerns[k]

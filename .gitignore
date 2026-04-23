@@ -2,3 +2,4 @@ crossgp/__pycache__/*
 dist/
 pyproject.toml
 poetry.lock
+.DS_Store
