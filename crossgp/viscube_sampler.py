@@ -79,8 +79,10 @@ class SharedVisSampler:
             if any('.' in s for s in self.param_names[i]):
                 for j in range(len(self.param_names[i])):
                     parts = self.param_names[i][j].split('.')
-                    attr = getattr(kerns[i],parts[0])
-                    setattr(attr, parts[1], thetas[i][j])
+                    obj = kerns[i]
+                    for part in parts[:-1]:
+                        obj = getattr(obj, part)
+                    setattr(obj, parts[-1], thetas[i][j])
             else:
                 for j in range(len(self.param_names[i])):
                     setattr(kerns[i], self.param_names[i][j], thetas[i][j])
