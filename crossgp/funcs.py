@@ -15,6 +15,26 @@ import multiprocessing as mp
 import warnings
 log_2_pi = np.log(2*np.pi)
 
+class Log10UniformSuperFlat(GPy.core.parameterization.priors.Prior):
+    ''' Log10 prior '''
+    domain = GPy.priors._POSITIVE
+    def __new__(cls, *args):
+        return object.__new__(cls)
+    def __init__(self, l, u):
+        self.lower = l
+        self.upper = u
+    def __str__(self):
+        return "Log10SuprFlat[{:.2g}, {:.2g}]".format(self.lower, self.upper)
+    def lnpdf(self, x):
+        log10x = np.log10(x)
+        inside = (log10x > self.lower) & (log10x < self.upper)
+        return np.where(inside, -log10x, -np.inf)
+    def lnpdf_grad(self, x):
+        log10x = np.log10(x)
+        inside = (log10x > self.lower) & (log10x < self.upper)
+        return np.where(inside, -1.0 / x, 0.0)
+    def rvs(self, n):
+        return 10 ** np.random.uniform(self.lower, self.upper, size=n)
 
 class Log10Uniform(GPy.core.parameterization.priors.Prior):
     ''' Log10 prior '''
