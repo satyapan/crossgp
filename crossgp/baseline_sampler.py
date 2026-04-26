@@ -30,16 +30,17 @@ class BaselineSampler:
     data_nights (list): List of two ps_eor.datacube.CartDataCube objects, corresponding to first and second night data cubes.
     kerns (list): List of two GPy.kern objects, for coherent and incoherent parts.
     noise_nights (list): List of two ps_eor.datacube.CartDataCube objects, corresponding to first and second night noise cubes.
-    param_names (list): List of two lists, containing hyperparameter names that are optimized. First list is for coherent part and second for incoherent part. If you want wedge parametrization for 'name.lengthscale', replace it by the pair 'name.angle', 'name.delay_buffer'
-    prior_bounds (list): List of priors OR floats (fixed values). Must have length len(param_names_flat) or len(param_names_flat)+1.
-                        If +1, the last element corresponds to noise_alpha (float=fixed, prior=sampled).
+    prior_bounds (list): List of three dicts: [coh_dict, inc_dict] plus an optional noise_alpha dict.
+                        coh_dict maps coherent param names to priors, inc_dict maps incoherent param names to priors.
+                        Priors can be GPy prior objects or floats (fixed values).
+                        An optional third dict {'noise_alpha': prior} enables sampling of the noise scaling parameter.
     umin (float): Minimum uv
     umax (float): Maximum uv
     uv_bins_du (float): uv bin spacing for which separate kernels are used
     k_eor (ml_gpr.VAEKernTorch): The VAE kernel used to generate the EoR covariance.
     bl_noise (bool): Use different noise variances for the different baseline groups.
     """
-    def __init__(self, data_nights, kerns, noise_nights, param_names, prior_bounds, umin, umax, uv_bins_du, k_eor=None, bl_noise=True):
+    def __init__(self, data_nights, kerns, noise_nights, prior_bounds, umin, umax, uv_bins_du, k_eor=None, bl_noise=True):
         self.data1 = data_nights[0]
         self.data2 = data_nights[1]
         self.freqs = self.data1.freqs.reshape(-1,1)*1e-6
@@ -57,20 +58,19 @@ class BaselineSampler:
             self.k_eor.uv_bins = self.uv_bins
             self.k_eor.set_mean_fmhz(self.freqs.mean())
             # self.k_eor.uv_ps_fct = None
-        self.param_names = param_names
+        coh_dict, inc_dict = prior_bounds[0], prior_bounds[1]
+        noise_alpha_dict = prior_bounds[2] if len(prior_bounds) == 3 else None
+        self.param_names = [list(coh_dict.keys()), list(inc_dict.keys())]
         self.param_names_flat = [item for sublist in self.param_names for item in sublist]
         self.wedge_idx = self.compute_wedge_idx()
 
         self.ndim_kernel = len(self.param_names_flat)
-        if len(prior_bounds) == self.ndim_kernel + 1:
-            self.has_noise_alpha = True
-        elif len(prior_bounds) == self.ndim_kernel:
-            self.has_noise_alpha = False
-        else:
-            raise ValueError("prior_bounds must have length ndim_kernel or ndim_kernel+1 (with noise_alpha).")
-
+        self.has_noise_alpha = noise_alpha_dict is not None
         self.param_names_full = self.param_names_flat + (['noise_alpha'] if self.has_noise_alpha else [])
-        self.prior_bounds = prior_bounds
+        priors_flat = list(coh_dict.values()) + list(inc_dict.values())
+        if noise_alpha_dict is not None:
+            priors_flat.append(list(noise_alpha_dict.values())[0])
+        self.prior_bounds = priors_flat
         self.ndim_full = len(self.param_names_full)
 
         self.fixed_vals = np.array([np.nan]*self.ndim_full, dtype=float)
@@ -84,7 +84,7 @@ class BaselineSampler:
         self.param_names_free = [self.param_names_full[i] for i in self.free_idx]
 
         self.ndim = len(self.free_idx)
-        self.N_theta1 = len(param_names[0])
+        self.N_theta1 = len(self.param_names[0])
         self.bl_noise = bl_noise
         if self.bl_noise:
             self.noise1_var = [noise_nights[0].data[:, self.idxs[i]].real.var() for i in range(self.N_bl)]
