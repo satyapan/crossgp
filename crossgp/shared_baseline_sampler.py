@@ -379,7 +379,11 @@ class SharedBaselineSampler:
         corner.corner(self.posterior_samples, labels=labels, smooth=1)
 
     def unpack_name(self, pred_name, kern_full, coh=True):
-        if any('.' in s for s in self.param_names[0] + self.param_names[1]):
+        param_list = self.param_names[(not coh)*1]
+        has_subcomps = any('.' in s for s in param_list)
+        if not coh and not has_subcomps:
+            has_subcomps = len(self.rho_map) > 0
+        if has_subcomps:
             if type(pred_name) == str:
                 if self.k_eor == None or pred_name != self.k_eor.name:
                     kern_pred = getattr(kern_full[(not coh)*1], pred_name)
