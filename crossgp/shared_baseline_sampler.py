@@ -33,7 +33,6 @@ class SharedBaselineSampler:
     prior_bounds (list): List of three dicts: [coh_dict, inc_dict] plus an optional noise_alpha dict.
                         coh_dict maps coherent param names to priors, inc_dict maps incoherent param names to priors.
                         Priors can be GPy prior objects or floats (fixed values).
-                        If a variance parameter has a corresponding '.rho' parameter in the coherent dict, it will treat that variance as the total variance and sample the '.rho' parameter as the fraction of variance that is coherent (the rest being incoherent).
                         An optional third dict {'noise_alpha': prior} enables sampling of the noise scaling parameter.
     umin (float): Minimum uv
     umax (float): Maximum uv
@@ -470,7 +469,7 @@ class SharedBaselineSampler:
             kern_pred = self.kern_from_name(pred_name, kern_full_b, coh=coh)
             if coh == True:
                 K_p = np.zeros_like(K)
-                Kp = kern_pred.K(self.freqs)
+                Kp = np.squeeze(kern_pred.K(self.freqs))
                 K_p[:N, :N] = Kp
                 K_p[N:, N:] = Kp
                 K_p[:N, N:] = Kp
@@ -493,7 +492,7 @@ class SharedBaselineSampler:
                     data_pred[i].data[:, idxb] = y_mean_complex[i]
             elif coh == False:
                 K_p = np.zeros_like(K)
-                Kp = kern_pred.K(self.freqs)
+                Kp = np.squeeze(kern_pred.K(self.freqs))
                 K_p[:N, :N] = Kp
                 K_p[N:, N:] = Kp
                 y_mean = K_p.T.dot(alpha)
@@ -512,8 +511,8 @@ class SharedBaselineSampler:
                     data_pred[i][1].data[:, idxb] = y_mean2_complex[i]
             else:
                 K_p = np.zeros_like(K)
-                Kp0 = kern_pred[0].K(self.freqs)
-                Kp1 = kern_pred[1].K(self.freqs)
+                Kp0 = np.squeeze(kern_pred[0].K(self.freqs))
+                Kp1 = np.squeeze(kern_pred[1].K(self.freqs))
                 K_p[:N, :N] = Kp0
                 K_p[N:, N:] = Kp0
                 K_p[:N, N:] = Kp0

@@ -440,7 +440,7 @@ class BaselineSampler:
             kern_pred = self.kern_from_name(pred_name, kern_full_b, coh=coh)
             if coh == True:
                 K_p = np.zeros_like(K)
-                Kp = kern_pred.K(self.freqs)
+                Kp = np.squeeze(kern_pred.K(self.freqs))
                 K_p[:N, :N] = Kp
                 K_p[N:, N:] = Kp
                 K_p[:N, N:] = Kp
@@ -463,7 +463,7 @@ class BaselineSampler:
                     data_pred[i].data[:, idxb] = y_mean_complex[i]
             elif coh == False:
                 K_p = np.zeros_like(K)
-                Kp = kern_pred.K(self.freqs)
+                Kp = np.squeeze(kern_pred.K(self.freqs))
                 K_p[:N, :N] = Kp
                 K_p[N:, N:] = Kp
                 y_mean = K_p.T.dot(alpha)
@@ -482,8 +482,8 @@ class BaselineSampler:
                     data_pred[i][1].data[:, idxb] = y_mean2_complex[i]
             else:
                 K_p = np.zeros_like(K)
-                Kp0 = kern_pred[0].K(self.freqs)
-                Kp1 = kern_pred[1].K(self.freqs)
+                Kp0 = np.squeeze(kern_pred[0].K(self.freqs))
+                Kp1 = np.squeeze(kern_pred[1].K(self.freqs))
                 K_p[:N, :N] = Kp0
                 K_p[N:, N:] = Kp0
                 K_p[:N, N:] = Kp0
