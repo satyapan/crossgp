@@ -13,6 +13,8 @@ from GPy.util import diag
 from GPy.util.linalg import pdinv, dpotrs, tdot, dpotri, jitchol
 import multiprocessing as mp
 import warnings
+import dynesty
+
 log_2_pi = np.log(2*np.pi)
 
 from .funcs import *
@@ -325,6 +327,31 @@ class SharedBaselineSampler:
         self.print_posterior_means()
         self.plot_corner()
 
+    def run_sampler_nested(self, nlive=50, sample='auto', dlogz=0.01):
+        def ptransform(u):
+            thetas = np.zeros(self.ndim)
+            for i, (ui, idx) in enumerate(zip(u, self.free_idx)):
+                prior = self.prior_bounds[idx]
+                if isinstance(prior, GPy.core.parameterization.priors.Uniform):
+                    thetas[i] = prior.lower + ui * (prior.upper - prior.lower)
+                else:
+                    thetas[i] = prior.ppf(ui)
+            return thetas
+
+        warnings.filterwarnings("ignore", message="divide by zero encountered in log", category=RuntimeWarning)
+        sampler = dynesty.NestedSampler(self.log_likelihood, ptransform, self.ndim,
+                                        nlive=nlive, sample=sample)
+        sampler.run_nested(dlogz=dlogz, print_progress=True)
+
+        results = sampler.results
+        self.result = results
+        weights = np.exp(results.logwt - results.logz[-1])
+        self.posterior_samples = dynesty.utils.resample_equal(results.samples, weights)
+        self.plot_samples_nested()
+        self.update_model_with_posterior_mean()
+        self.print_posterior_means()
+        self.plot_corner()
+
     def clip_outliers(self, discard, clip_nsigma=6, discard_walkers_nsigma=10):
         samples = self.result.get_chain(discard=discard)
         log_prob = self.result.get_log_prob(discard=discard)
@@ -377,6 +404,23 @@ class SharedBaselineSampler:
     def plot_corner(self):
         labels = self.param_names_free.copy()
         corner.corner(self.posterior_samples, labels=labels, smooth=1)
+
+    def plot_samples_nested(self):
+        samples = self.result.samples
+        logl = self.result.logl
+        ncols = 4
+        nrows = int(np.ceil((self.ndim + 1) / ncols))
+        labels = self.param_names_free.copy()
+        fig, ax = plt.subplots(nrows=nrows, ncols=ncols, figsize=(12, 1 + 2.2 * nrows), sharex=True)
+        for i in range(self.ndim):
+            if 'variance' in labels[i]:
+                ax[i//ncols, i%ncols].set_yscale('log')
+            ax[i//ncols, i%ncols].text(0.01, 0.95, labels[i]+'=%.4f'%(np.median(samples[:, i])),
+                                       transform=ax[i//ncols, i%ncols].transAxes, fontsize=9, va='top', ha='left')
+            ax[i//ncols, i%ncols].plot(samples[:, i], color='tab:orange', alpha=0.6)
+        ax[self.ndim//ncols, self.ndim%ncols].plot(logl, color='tab:orange', alpha=0.6)
+        ax[self.ndim//ncols, self.ndim%ncols].text(0.01, 0.95, 'likelihood=%.4f'%(np.median(logl)),
+                                                   transform=ax[self.ndim//ncols, self.ndim%ncols].transAxes, fontsize=9, va='top', ha='left')
 
     def unpack_name(self, pred_name, kern_full, coh=True):
         param_list = self.param_names[(not coh)*1]

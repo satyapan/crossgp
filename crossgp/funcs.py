@@ -13,6 +13,8 @@ from GPy.util import diag
 from GPy.util.linalg import pdinv, dpotrs, tdot, dpotri, jitchol
 import multiprocessing as mp
 import warnings
+from scipy.interpolate import interp1d
+
 log_2_pi = np.log(2*np.pi)
 
 class Log10UniformSuperFlat(GPy.core.parameterization.priors.Prior):
@@ -35,6 +37,8 @@ class Log10UniformSuperFlat(GPy.core.parameterization.priors.Prior):
         return np.where(inside, -1.0 / x, 0.0)
     def rvs(self, n):
         return 10 ** np.random.uniform(self.lower, self.upper, size=n)
+    def ppf(self, u):
+        return 10 ** (self.lower + u * (self.upper - self.lower))
 
 class Log10Uniform(GPy.core.parameterization.priors.Prior):
     ''' Log10 prior '''
@@ -60,6 +64,9 @@ class Log10Uniform(GPy.core.parameterization.priors.Prior):
 
     def rvs(self, n):
         return 10 ** np.random.uniform(self.lower, self.upper, size=n)
+
+    def ppf(self, u):
+        return 10 ** (self.lower + u * (self.upper - self.lower))
 
 
 def nearest_postive_definite(A, maxtries=10):
@@ -108,3 +115,39 @@ def is_positive_definite(B):
 def get_uv_bins(umin, umax, du):
     '''Return uv bins from umin to umax with a bin width of du'''
     return psutil.pairwise(np.arange(umin, umax + du, du))
+
+def robust_freq_width(freqs):
+    '''Return frequency width, robust to gaps in freqs'''
+    dfs = np.diff(freqs)
+    m, idx, c = np.unique(np.round(dfs * 1e-3) * 1e3, return_counts=True, return_inverse=True)
+    return dfs[np.where(idx == np.argmax(c))].mean()
+
+def get_freqs_gaps(freqs):
+    '''Return missing frequencies '''
+    df = robust_freq_width(freqs)
+    gaps = np.array(np.round(np.diff(freqs) / df) - 1).astype(int)
+    freqs_gaps = []
+    for i, freq in enumerate(freqs):
+        if i < len(gaps) and gaps[i] > 0:
+            freqs_gaps.extend(freq + df * (np.arange(gaps[i]) + 1))
+    return np.array(freqs_gaps)
+
+def get_freqs(cube, fill_gaps=False):
+    freqs = cube.freqs
+    if fill_gaps:
+        freqs = np.array(sorted(np.concatenate((freqs, psutil.get_freqs_gaps(freqs)))))
+    return freqs[:,None]
+
+def new_with_zeros(cube, freqs=None):
+    cube_new = cube.copy()
+    weights = cube_new.weights
+    if freqs is None or len(cube.freqs)==len(freqs):
+        cube_new.data = np.zeros_like(cube_new.data)
+        return cube_new
+    freqs = np.squeeze(freqs)
+    w = interp1d(weights.freqs, weights.data, bounds_error=False, fill_value='extrapolate', axis=0)(freqs)
+    cube_new.weights.freqs = freqs
+    cube_new.weights.data = w
+    cube_new.data = np.zeros_like(w)
+    cube_new.freqs = freqs
+    return cube_new
