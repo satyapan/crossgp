@@ -288,7 +288,7 @@ class BaselineSampler:
             with mp.Pool(processes=ncores) as pool:
                 sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.log_posterior, moves=moves, pool=pool)
                 sampler.run_mcmc(p0, nsteps, progress=True)
-
+        self.sampler_method = 'mcmc'
         self.result = sampler
         self.plot_samples()
         self.discard = discard
@@ -312,7 +312,7 @@ class BaselineSampler:
         sampler = dynesty.NestedSampler(self.log_likelihood, ptransform, self.ndim,
                                         nlive=nlive, sample=sample)
         sampler.run_nested(dlogz=dlogz, print_progress=True)
-
+        self.sampler_method = 'nested'
         results = sampler.results
         self.result = results
         weights = np.exp(results.logwt - results.logz[-1])
@@ -581,7 +581,10 @@ class BaselineSampler:
     def sample_cubes(self, pred_name, coh=True, discard=None, n_pick=100, subtract_from=None, combine=False):
         if discard is None:
             discard = self.discard
-        flat_samples, _ = self.clip_outliers(discard)
+        if self.sampler_method == 'mcmc':
+            flat_samples, _ = self.clip_outliers(discard)
+        else:
+            flat_samples = self.posterior_samples
         idx = np.random.choice(flat_samples.shape[0], size=n_pick, replace=False)
         picked_samples = flat_samples[idx]
         cubes = []
