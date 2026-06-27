@@ -1,0 +1,10 @@
+[tool.poetry]
+name = "crossgp"
+version = "0.1.0"
+description = "Coherent and incoherent component separation with Gaussian processes"
+authors = ["satyapan <satyapan.iiserm@gmail.com>"]
+readme = "README.md"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
